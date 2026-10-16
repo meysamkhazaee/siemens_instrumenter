@@ -2,3 +2,5 @@ output
 /build
 /dist
 .vscode/settings.json
+input/siemens/
+*.spec

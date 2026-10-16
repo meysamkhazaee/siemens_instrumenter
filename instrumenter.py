@@ -29,7 +29,7 @@ FUNCTION_KINDS = {
 
 
 # ============================================================
-# Platform helpers
+# Platform
 # ============================================================
 
 def is_windows():
@@ -65,14 +65,12 @@ def resolve_custom_compiler(value):
         return str(path.resolve())
 
     raise RuntimeError(
-        f"Compiler was not found: {value}"
+        f"Compiler not found: {value}"
     )
 
 
-def find_compiler(
-    language,
-    custom_compiler=None
-):
+def find_compiler(language, custom_compiler=None):
+
     if custom_compiler:
         return resolve_custom_compiler(
             custom_compiler
@@ -84,23 +82,13 @@ def find_compiler(
         else "clang"
     )
 
-    # --------------------------------------------------------
-    # Search PATH
-    # --------------------------------------------------------
-
-    found = shutil.which(
-        compiler_name
-    )
+    # PATH
+    found = shutil.which(compiler_name)
 
     if found:
-        return str(
-            Path(found).resolve()
-        )
+        return str(Path(found).resolve())
 
-    # --------------------------------------------------------
-    # Windows fallback locations
-    # --------------------------------------------------------
-
+    # Windows
     if is_windows():
 
         exe = (
@@ -110,44 +98,25 @@ def find_compiler(
         )
 
         candidates = [
-            Path(
-                rf"C:\msys64\ucrt64\bin\{exe}"
-            ),
-            Path(
-                rf"C:\msys64\mingw64\bin\{exe}"
-            ),
-            Path(
-                rf"C:\msys64\clang64\bin\{exe}"
-            ),
-            Path(
-                rf"C:\Program Files\LLVM\bin\{exe}"
-            ),
+            Path(rf"C:\msys64\ucrt64\bin\{exe}"),
+            Path(rf"C:\msys64\mingw64\bin\{exe}"),
+            Path(rf"C:\msys64\clang64\bin\{exe}"),
+            Path(rf"C:\Program Files\LLVM\bin\{exe}"),
         ]
 
-    # --------------------------------------------------------
-    # Linux fallback locations
-    # --------------------------------------------------------
-
+    # Linux
     else:
 
         candidates = [
-            Path(
-                f"/usr/bin/{compiler_name}"
-            ),
-            Path(
-                f"/usr/local/bin/{compiler_name}"
-            ),
-            Path(
-                f"/opt/llvm/bin/{compiler_name}"
-            ),
+            Path(f"/usr/bin/{compiler_name}"),
+            Path(f"/usr/local/bin/{compiler_name}"),
+            Path(f"/opt/llvm/bin/{compiler_name}"),
         ]
 
     for candidate in candidates:
 
         if candidate.is_file():
-            return str(
-                candidate.resolve()
-            )
+            return str(candidate.resolve())
 
     raise RuntimeError(
         f"Cannot find {compiler_name}.\n"
@@ -157,10 +126,11 @@ def find_compiler(
 
 
 # ============================================================
-# Language detection
+# Language
 # ============================================================
 
 def detect_language(path):
+
     extension = path.suffix.lower()
 
     if extension == ".c":
@@ -175,47 +145,17 @@ def detect_language(path):
         return "cpp"
 
     raise RuntimeError(
-        f"Unsupported source extension: "
-        f"{extension}"
+        f"Unsupported source extension: {extension}"
     )
 
 
 # ============================================================
-# Run Clang AST
+# Process helper
 # ============================================================
 
-def run_clang_ast(
-    source,
-    language,
-    compiler,
-    extra_args
-):
-    command = [
-        compiler
-    ]
+def run_process(command):
 
-    if language == "cpp":
-        command.append(
-            "-std=c++17"
-        )
-    else:
-        command.append(
-            "-std=c11"
-        )
-
-    command += [
-        "-fsyntax-only",
-        "-Xclang",
-        "-ast-dump=json",
-    ]
-
-    command += extra_args
-
-    command.append(
-        str(source)
-    )
-
-    result = subprocess.run(
+    return subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -224,25 +164,158 @@ def run_clang_ast(
         errors="replace",
     )
 
-    if result.returncode != 0:
 
-        raise RuntimeError(
-            "Clang parsing failed:\n\n"
-            + result.stderr
+# ============================================================
+# Clang AST
+# ============================================================
+
+def run_clang_ast(
+    source,
+    language,
+    compiler,
+    extra_args
+):
+
+    common_flags = [
+        "-fsyntax-only",
+        "-Xclang",
+        "-ast-dump=json",
+    ]
+
+    # ========================================================
+    # C++
+    # ========================================================
+
+    if language == "cpp":
+
+        command = [
+            compiler,
+            "-std=c++17",
+            *common_flags,
+            *extra_args,
+            str(source),
+        ]
+
+        result = run_process(command)
+
+        if result.returncode != 0:
+
+            raise RuntimeError(
+                "Clang C++ parsing failed:\n\n"
+                + result.stderr
+            )
+
+        try:
+            ast = json.loads(result.stdout)
+
+        except json.JSONDecodeError as error:
+
+            raise RuntimeError(
+                "Could not parse Clang AST JSON:\n"
+                + str(error)
+            )
+
+        return (
+            ast,
+            "C++17",
+            False,
         )
 
-    try:
+    # ========================================================
+    # C
+    #
+    # First:
+    #   GNU C11
+    #
+    # Fallback:
+    #   GNU89 / K&R
+    # ========================================================
 
-        return json.loads(
-            result.stdout
+    modes = [
+
+        (
+            "GNU C11",
+            [
+                "-std=gnu11",
+            ],
+            False,
+        ),
+
+        (
+            "GNU89 / K&R C",
+            [
+                "-std=gnu89",
+
+                "-Wno-implicit-int",
+                "-Wno-implicit-function-declaration",
+                "-Wno-return-mismatch",
+                "-Wno-return-type",
+                "-Wno-deprecated-non-prototype",
+                "-Wno-empty-body",
+            ],
+            True,
+        ),
+    ]
+
+    failures = []
+
+    for (
+        mode_name,
+        mode_flags,
+        legacy_c
+    ) in modes:
+
+        command = [
+            compiler,
+            *mode_flags,
+            *common_flags,
+            *extra_args,
+            str(source),
+        ]
+
+        result = run_process(command)
+
+        if result.returncode == 0:
+
+            try:
+                ast = json.loads(
+                    result.stdout
+                )
+
+            except json.JSONDecodeError as error:
+
+                raise RuntimeError(
+                    "Could not parse Clang AST JSON:\n"
+                    + str(error)
+                )
+
+            return (
+                ast,
+                mode_name,
+                legacy_c,
+            )
+
+        failures.append(
+            (
+                mode_name,
+                result.stderr
+            )
         )
 
-    except json.JSONDecodeError as error:
+    message = (
+        "Clang could not parse the C source.\n\n"
+        "Tried parser modes:\n"
+    )
 
-        raise RuntimeError(
-            "Could not parse Clang AST JSON:\n"
-            + str(error)
-        )
+    for mode_name, _ in failures:
+        message += f"  - {mode_name}\n"
+
+    message += (
+        "\nLast Clang error:\n\n"
+        + failures[-1][1]
+    )
+
+    raise RuntimeError(message)
 
 
 # ============================================================
@@ -250,26 +323,22 @@ def run_clang_ast(
 # ============================================================
 
 def unwrap_location(location):
-    if not isinstance(
-        location,
-        dict
-    ):
+
+    if not isinstance(location, dict):
         return {}
 
     expansion = location.get(
         "expansionLoc"
     )
 
-    if isinstance(
-        expansion,
-        dict
-    ):
+    if isinstance(expansion, dict):
         return expansion
 
     return location
 
 
 def get_begin(node):
+
     location = (
         node
         .get("range", {})
@@ -280,20 +349,16 @@ def get_begin(node):
         location
     )
 
-    offset = location.get(
-        "offset"
-    )
+    offset = location.get("offset")
 
-    if isinstance(
-        offset,
-        int
-    ):
+    if isinstance(offset, int):
         return offset
 
     return None
 
 
 def get_end(node):
+
     location = (
         node
         .get("range", {})
@@ -304,25 +369,17 @@ def get_end(node):
         location
     )
 
-    offset = location.get(
-        "offset"
-    )
+    offset = location.get("offset")
 
     token_length = location.get(
         "tokLen",
         1
     )
 
-    if not isinstance(
-        offset,
-        int
-    ):
+    if not isinstance(offset, int):
         return None
 
-    if not isinstance(
-        token_length,
-        int
-    ):
+    if not isinstance(token_length, int):
         token_length = 1
 
     return (
@@ -331,7 +388,28 @@ def get_end(node):
     )
 
 
+def get_end_token_offset(node):
+
+    location = (
+        node
+        .get("range", {})
+        .get("end", {})
+    )
+
+    location = unwrap_location(
+        location
+    )
+
+    offset = location.get("offset")
+
+    if isinstance(offset, int):
+        return offset
+
+    return None
+
+
 def normalized_path(path):
+
     try:
 
         return os.path.normcase(
@@ -349,6 +427,7 @@ def is_main_file_node(
     node,
     source
 ):
+
     location = (
         node
         .get("range", {})
@@ -362,16 +441,13 @@ def is_main_file_node(
     if not location:
         return False
 
-    # Header-originated node
+    # Header-originated AST node.
     if "includedFrom" in location:
         return False
 
-    filename = location.get(
-        "file"
-    )
+    filename = location.get("file")
 
-    # Clang commonly omits file for the primary
-    # translation unit.
+    # Main translation unit frequently has no filename here.
     if filename is None:
         return True
 
@@ -383,6 +459,7 @@ def is_main_file_node(
 
 
 def children(node):
+
     return [
         child
         for child
@@ -399,6 +476,7 @@ def line_number(
     source_data,
     offset
 ):
+
     return (
         source_data[:offset]
         .count(b"\n")
@@ -410,6 +488,7 @@ def indentation_at(
     source_data,
     offset
 ):
+
     line_start = source_data.rfind(
         b"\n",
         0,
@@ -431,7 +510,7 @@ def indentation_at(
         ]
         in (
             b" ",
-            b"\t"
+            b"\t",
         )
     ):
         position += 1
@@ -458,16 +537,12 @@ class Point:
         line,
         data=None
     ):
+
         self.offset = offset
         self.kind = kind
         self.position = position
         self.line = line
-
-        self.data = (
-            data
-            if data is not None
-            else {}
-        )
+        self.data = data or {}
 
         self.marker = None
 
@@ -479,14 +554,17 @@ class Point:
 def collect_points(
     ast,
     source,
-    source_data
+    source_data,
+    legacy_c
 ):
+
     points = []
     seen = set()
-    warnings = []
+
+    main_found = False
 
     # ========================================================
-    # Add instrumentation point
+    # Add P point
     # ========================================================
 
     def add(
@@ -495,29 +573,26 @@ def collect_points(
         position,
         data=None
     ):
+
         if offset is None:
             return
 
         if offset < 0:
             return
 
-        if offset > len(
-            source_data
-        ):
+        if offset > len(source_data):
             return
 
         key = (
             offset,
             kind,
-            position
+            position,
         )
 
         if key in seen:
             return
 
-        seen.add(
-            key
-        )
+        seen.add(key)
 
         points.append(
             Point(
@@ -536,29 +611,23 @@ def collect_points(
         )
 
     # ========================================================
-    # Find compound opening {
+    # Compound {
     # ========================================================
 
     def body_brace(node):
+
         if node is None:
             return None
 
-        if (
-            node.get("kind")
-            != "CompoundStmt"
-        ):
+        if node.get("kind") != "CompoundStmt":
             return None
 
-        offset = get_begin(
-            node
-        )
+        offset = get_begin(node)
 
         if offset is None:
             return None
 
-        if offset >= len(
-            source_data
-        ):
+        if offset >= len(source_data):
             return None
 
         if (
@@ -572,23 +641,235 @@ def collect_points(
         return offset
 
     # ========================================================
-    # Process one standalone statement
+    # Full source statement end
+    #
+    # Clang often reports:
+    #
+    #     x++
+    #
+    # instead of:
+    #
+    #     x++;
+    #
+    # This extends through the trailing semicolon.
+    # ========================================================
+
+    def statement_end(statement):
+
+        end = get_end(statement)
+
+        if end is None:
+            return None
+
+        position = end
+
+        while position < len(source_data):
+
+            current = source_data[
+                position:position + 1
+            ]
+
+            # whitespace
+            if current in (
+                b" ",
+                b"\t",
+                b"\r",
+                b"\n",
+            ):
+                position += 1
+                continue
+
+            # /* ... */
+            if (
+                source_data[
+                    position:position + 2
+                ]
+                == b"/*"
+            ):
+
+                close = source_data.find(
+                    b"*/",
+                    position + 2
+                )
+
+                if close < 0:
+                    break
+
+                position = close + 2
+                continue
+
+            # // ...
+            if (
+                source_data[
+                    position:position + 2
+                ]
+                == b"//"
+            ):
+
+                close = source_data.find(
+                    b"\n",
+                    position + 2
+                )
+
+                if close < 0:
+                    return len(source_data)
+
+                position = close + 1
+                continue
+
+            break
+
+        if (
+            position < len(source_data)
+            and
+            source_data[
+                position:position + 1
+            ]
+            == b";"
+        ):
+
+            return position + 1
+
+        return end
+
+    # ========================================================
+    # Block entry
+    #
+    # For old C89/K&R code we MUST NOT insert a statement
+    # before local declarations.
+    #
+    # Bad C89:
+    #
+    # {
+    #     __P_TRACE(...);
+    #     int x;
+    # }
+    #
+    # Therefore in legacy C we insert after all leading
+    # DeclStmt nodes.
+    # ========================================================
+
+    def block_entry_location(compound):
+
+        brace = body_brace(compound)
+
+        if brace is None:
+            return None, None
+
+        if not legacy_c:
+
+            return (
+                brace + 1,
+                "after-brace"
+            )
+
+        for child in children(compound):
+
+            if child.get("kind") == "DeclStmt":
+                continue
+
+            offset = get_begin(child)
+
+            if offset is not None:
+
+                return (
+                    offset,
+                    "before-statement"
+                )
+
+        # Block contains declarations only.
+        closing_brace = get_end_token_offset(
+            compound
+        )
+
+        if closing_brace is not None:
+
+            return (
+                closing_brace,
+                "before-statement"
+            )
+
+        return (
+            brace + 1,
+            "after-brace"
+        )
+
+    def add_block_entry(
+        compound,
+        kind,
+        data=None
+    ):
+
+        offset, position = (
+            block_entry_location(
+                compound
+            )
+        )
+
+        add(
+            offset,
+            kind,
+            position,
+            data
+        )
+
+    # ========================================================
+    # Wrap unbraced body
+    #
+    # Original:
+    #
+    # if (x)
+    #     foo();
+    #
+    # Generated:
+    #
+    # if (x)
+    # {
+    #     P;
+    #     foo();
+    # }
+    # ========================================================
+
+    def add_wrapped_body(
+        statement,
+        kind
+    ):
+
+        begin = get_begin(statement)
+        end = statement_end(statement)
+
+        if (
+            begin is None
+            or end is None
+        ):
+            return
+
+        add(
+            begin,
+            kind,
+            "wrap-statement",
+            {
+                "end": end
+            }
+        )
+
+    # ========================================================
+    # Single nested statement
     # ========================================================
 
     def process_single_statement(
         statement,
         covered
     ):
-        kind = statement.get(
-            "kind"
-        )
+
+        kind = statement.get("kind")
 
         if kind == "IfStmt":
 
             return process_if(
                 statement,
                 covered,
-                has_next=False
+                False
             )
 
         if kind in LOOP_KINDS:
@@ -596,6 +877,14 @@ def collect_points(
             return process_loop(
                 statement,
                 covered
+            )
+
+        if kind == "SwitchStmt":
+
+            return process_switch(
+                statement,
+                covered,
+                False
             )
 
         if kind == "CompoundStmt":
@@ -612,7 +901,7 @@ def collect_points(
         return covered
 
     # ========================================================
-    # Process IF
+    # IF
     # ========================================================
 
     def process_if(
@@ -620,9 +909,8 @@ def collect_points(
         covered,
         has_next
     ):
-        items = children(
-            statement
-        )
+
+        items = children(statement)
 
         has_else = statement.get(
             "hasElse",
@@ -634,36 +922,22 @@ def collect_points(
             if len(items) < 2:
                 return covered
 
-            then_statement = (
-                items[-2]
-            )
-
-            else_statement = (
-                items[-1]
-            )
+            then_statement = items[-2]
+            else_statement = items[-1]
 
         else:
 
             if not items:
                 return covered
 
-            then_statement = (
-                items[-1]
-            )
-
+            then_statement = items[-1]
             else_statement = None
 
-        # ----------------------------------------------------
-        # Add an IF block marker only when the current
-        # straight-line path has not already been covered.
-        # ----------------------------------------------------
-
+        # Current straight-line block does not yet have a P.
         if not covered:
 
             add(
-                get_begin(
-                    statement
-                ),
+                get_begin(statement),
                 "IfBlock",
                 "before-statement"
             )
@@ -671,13 +945,11 @@ def collect_points(
             covered = True
 
         # ----------------------------------------------------
-        # THEN branch
+        # THEN
         # ----------------------------------------------------
 
         if (
-            then_statement.get(
-                "kind"
-            )
+            then_statement.get("kind")
             == "CompoundStmt"
         ):
 
@@ -690,25 +962,24 @@ def collect_points(
 
         else:
 
-            warnings.append(
-                (
-                    get_begin(
-                        then_statement
-                    ),
-                    "unbraced-if-then"
-                )
+            add_wrapped_body(
+                then_statement,
+                "IfThen"
+            )
+
+            process_single_statement(
+                then_statement,
+                True
             )
 
         # ----------------------------------------------------
-        # ELSE branch
+        # ELSE
         # ----------------------------------------------------
 
         if else_statement is not None:
 
             if (
-                else_statement.get(
-                    "kind"
-                )
+                else_statement.get("kind")
                 == "CompoundStmt"
             ):
 
@@ -720,41 +991,36 @@ def collect_points(
                 )
 
             elif (
-                else_statement.get(
-                    "kind"
-                )
+                else_statement.get("kind")
                 == "IfStmt"
             ):
 
-                # else if (...)
+                # else if(...)
                 process_single_statement(
                     else_statement,
-                    covered=False
+                    False
                 )
 
             else:
 
-                warnings.append(
-                    (
-                        get_begin(
-                            else_statement
-                        ),
-                        "unbraced-if-else"
-                    )
+                add_wrapped_body(
+                    else_statement,
+                    "IfElse"
+                )
+
+                process_single_statement(
+                    else_statement,
+                    True
                 )
 
         # ----------------------------------------------------
         # Merge point
-        #
-        # Only necessary if execution continues after IF.
         # ----------------------------------------------------
 
         if has_next:
 
             add(
-                get_end(
-                    statement
-                ),
+                statement_end(statement),
                 "IfMerge",
                 "after-statement"
             )
@@ -764,35 +1030,27 @@ def collect_points(
         return False
 
     # ========================================================
-    # Process LOOP
+    # LOOP
     # ========================================================
 
     def process_loop(
         statement,
         covered
     ):
-        kind = statement.get(
-            "kind"
-        )
 
-        items = children(
-            statement
-        )
+        kind = statement.get("kind")
+
+        items = children(statement)
 
         if not items:
             return covered
 
-        # ----------------------------------------------------
-        # Avoid duplicate loop-header marker if current block
-        # is already represented.
-        # ----------------------------------------------------
-
+        # No duplicate marker when preceding block already
+        # represents entry to this loop.
         if not covered:
 
             add(
-                get_begin(
-                    statement
-                ),
+                get_begin(statement),
                 "LoopHeader",
                 "before-statement"
             )
@@ -800,19 +1058,13 @@ def collect_points(
             covered = True
 
         # ----------------------------------------------------
-        # Find body
+        # Body
         # ----------------------------------------------------
 
         if kind == "DoStmt":
             body = items[0]
         else:
             body = items[-1]
-
-        # ----------------------------------------------------
-        # Loop body marker
-        #
-        # Executes once per loop iteration.
-        # ----------------------------------------------------
 
         if (
             body.get("kind")
@@ -831,21 +1083,26 @@ def collect_points(
 
         else:
 
-            warnings.append(
-                (
-                    get_begin(body),
-                    "unbraced-loop"
-                )
+            # Support:
+            #
+            # while(...)
+            #     statement;
+            #
+            # for(...);
+            #
+            add_wrapped_body(
+                body,
+                kind + "Body"
             )
 
-        # ----------------------------------------------------
-        # Loop exit marker
-        # ----------------------------------------------------
+            process_single_statement(
+                body,
+                True
+            )
 
+        # Loop completion / zero-iteration path.
         add(
-            get_end(
-                statement
-            ),
+            statement_end(statement),
             kind + "Exit",
             "after-statement"
         )
@@ -853,7 +1110,218 @@ def collect_points(
         return True
 
     # ========================================================
-    # Process compound { ... }
+    # SWITCH / CASE
+    # ========================================================
+
+    def process_switch_label(label):
+
+        items = children(label)
+
+        if not items:
+            return True
+
+        # Last child is the statement following:
+        #
+        # case X:
+        #
+        # or:
+        #
+        # default:
+        sub_statement = items[-1]
+
+        label_kind = label.get("kind")
+
+        add(
+            get_begin(sub_statement),
+            (
+                "DefaultEntry"
+                if label_kind == "DefaultStmt"
+                else "CaseEntry"
+            ),
+            "before-statement"
+        )
+
+        kind = sub_statement.get("kind")
+
+        # case 1:
+        # case 2:
+        if kind in {
+            "CaseStmt",
+            "DefaultStmt",
+        }:
+
+            return process_switch_label(
+                sub_statement
+            )
+
+        if kind == "IfStmt":
+
+            return process_if(
+                sub_statement,
+                True,
+                False
+            )
+
+        if kind in LOOP_KINDS:
+
+            return process_loop(
+                sub_statement,
+                True
+            )
+
+        if kind == "SwitchStmt":
+
+            return process_switch(
+                sub_statement,
+                True,
+                False
+            )
+
+        if kind == "CompoundStmt":
+
+            process_compound(
+                sub_statement,
+                entry_probe=False,
+                initial_covered=True
+            )
+
+            return True
+
+        if kind in {
+            "ReturnStmt",
+            "BreakStmt",
+            "ContinueStmt",
+        }:
+
+            return False
+
+        return True
+
+    def process_switch(
+        statement,
+        covered,
+        has_next
+    ):
+
+        items = children(statement)
+
+        if not items:
+            return covered
+
+        if not covered:
+
+            add(
+                get_begin(statement),
+                "SwitchBlock",
+                "before-statement"
+            )
+
+            covered = True
+
+        body = items[-1]
+
+        if body.get("kind") == "CompoundStmt":
+
+            switch_covered = False
+
+            body_items = children(body)
+
+            for index, child in enumerate(
+                body_items
+            ):
+
+                kind = child.get("kind")
+
+                child_has_next = (
+                    index + 1
+                    < len(body_items)
+                )
+
+                if kind in {
+                    "CaseStmt",
+                    "DefaultStmt",
+                }:
+
+                    switch_covered = (
+                        process_switch_label(
+                            child
+                        )
+                    )
+
+                elif kind == "IfStmt":
+
+                    switch_covered = (
+                        process_if(
+                            child,
+                            switch_covered,
+                            child_has_next
+                        )
+                    )
+
+                elif kind in LOOP_KINDS:
+
+                    switch_covered = (
+                        process_loop(
+                            child,
+                            switch_covered
+                        )
+                    )
+
+                elif kind == "SwitchStmt":
+
+                    switch_covered = (
+                        process_switch(
+                            child,
+                            switch_covered,
+                            child_has_next
+                        )
+                    )
+
+                elif kind in {
+                    "ReturnStmt",
+                    "BreakStmt",
+                    "ContinueStmt",
+                }:
+
+                    if not switch_covered:
+
+                        add(
+                            get_begin(child),
+                            kind.replace(
+                                "Stmt",
+                                ""
+                            )
+                            + "Block",
+                            "before-statement"
+                        )
+
+                    switch_covered = False
+
+                elif kind == "CompoundStmt":
+
+                    process_compound(
+                        child,
+                        entry_probe=not switch_covered,
+                        entry_kind="BlockEntry",
+                        initial_covered=switch_covered
+                    )
+
+                    switch_covered = True
+
+        if has_next:
+
+            add(
+                statement_end(statement),
+                "SwitchExit",
+                "after-statement"
+            )
+
+            return True
+
+        return False
+
+    # ========================================================
+    # Compound statement
     # ========================================================
 
     def process_compound(
@@ -862,53 +1330,34 @@ def collect_points(
         entry_kind="BlockEntry",
         initial_covered=False
     ):
-        items = children(
-            compound
-        )
 
         covered = initial_covered
 
-        brace = body_brace(
+        statements = children(
             compound
         )
 
-        # ----------------------------------------------------
-        # Function / IF branch / loop body entry
-        # ----------------------------------------------------
+        if entry_probe:
 
-        if (
-            entry_probe
-            and brace is not None
-        ):
-
-            add(
-                brace + 1,
-                entry_kind,
-                "after-brace"
+            add_block_entry(
+                compound,
+                entry_kind
             )
 
             covered = True
 
-        # ----------------------------------------------------
-        # Sequential statements
-        # ----------------------------------------------------
-
         for index, statement in enumerate(
-            items
+            statements
         ):
-            kind = statement.get(
-                "kind"
-            )
+
+            kind = statement.get("kind")
 
             has_next = (
                 index + 1
-                < len(items)
+                < len(statements)
             )
 
-            # =================================================
             # IF
-            # =================================================
-
             if kind == "IfStmt":
 
                 covered = process_if(
@@ -917,10 +1366,7 @@ def collect_points(
                     has_next
                 )
 
-            # =================================================
             # LOOP
-            # =================================================
-
             elif kind in LOOP_KINDS:
 
                 covered = process_loop(
@@ -928,67 +1374,55 @@ def collect_points(
                     covered
                 )
 
-            # =================================================
-            # RETURN
-            # =================================================
+            # SWITCH
+            elif kind == "SwitchStmt":
 
+                covered = process_switch(
+                    statement,
+                    covered,
+                    has_next
+                )
+
+            # RETURN
             elif kind == "ReturnStmt":
 
-                # A return does not need another marker when
-                # its current path already has a marker.
                 if not covered:
 
                     add(
-                        get_begin(
-                            statement
-                        ),
+                        get_begin(statement),
                         "ReturnBlock",
                         "before-statement"
                     )
 
-                # No continuation after return.
                 covered = False
 
-            # =================================================
             # BREAK
-            # =================================================
-
             elif kind == "BreakStmt":
 
                 if not covered:
 
                     add(
-                        get_begin(
-                            statement
-                        ),
+                        get_begin(statement),
                         "BreakBlock",
                         "before-statement"
                     )
 
                 covered = False
 
-            # =================================================
             # CONTINUE
-            # =================================================
-
             elif kind == "ContinueStmt":
 
                 if not covered:
 
                     add(
-                        get_begin(
-                            statement
-                        ),
+                        get_begin(statement),
                         "ContinueBlock",
                         "before-statement"
                     )
 
                 covered = False
 
-            # =================================================
-            # Nested compound
-            # =================================================
-
+            # Nested block
             elif kind == "CompoundStmt":
 
                 process_compound(
@@ -1000,29 +1434,24 @@ def collect_points(
 
                 covered = True
 
-            # =================================================
-            # Normal straight-line statement
-            # =================================================
-
+            # Declaration / expression / assignment / call...
             else:
                 pass
 
         return covered
 
     # ========================================================
-    # Walk AST and find functions
+    # AST walk
     # ========================================================
 
     def walk(node):
-        if not isinstance(
-            node,
-            dict
-        ):
+
+        nonlocal main_found
+
+        if not isinstance(node, dict):
             return
 
-        kind = node.get(
-            "kind"
-        )
+        kind = node.get("kind")
 
         if (
             kind != "TranslationUnitDecl"
@@ -1072,6 +1501,8 @@ def collect_points(
 
             if function_name == "main":
 
+                main_found = True
+
                 parameters = [
                     child
                     for child
@@ -1082,18 +1513,15 @@ def collect_points(
                     )
                 ]
 
-                # Runtime argument requires:
-                #
-                # int main(int argc, char **argv)
-                #
                 if len(parameters) < 2:
 
                     raise RuntimeError(
                         "main() must provide argc and argv.\n\n"
-                        "Supported form:\n"
-                        "  int main(int argc, char *argv[])\n\n"
-                        "This is required because the trace output "
-                        "path is supplied using --p-output."
+                        "Supported forms include:\n"
+                        "  int main(int argc, char *argv[])\n"
+                        "  main(argc, argv) ...  /* K&R C */\n\n"
+                        "argc/argv are required because the "
+                        "trace file is supplied using --p-output."
                     )
 
                 argc_name = (
@@ -1113,40 +1541,27 @@ def collect_points(
                 ):
 
                     raise RuntimeError(
-                        "Could not determine argc/argv "
-                        "parameter names in main()."
+                        "Could not determine argc/argv names "
+                        "in main()."
                     )
 
-                brace = body_brace(
-                    body
+                entry_offset, entry_position = (
+                    block_entry_location(
+                        body
+                    )
                 )
 
-                if brace is None:
-
-                    raise RuntimeError(
-                        "Could not locate main() body."
-                    )
-
-                # --------------------------------------------
-                # This single point performs:
-                #
-                # __P_INIT(&argc, argv);
-                # __P_TRACE(P1);
-                #
-                # --------------------------------------------
-
                 add(
-                    brace + 1,
+                    entry_offset,
                     "MainEntry",
-                    "after-brace",
-                    data={
+                    entry_position,
+                    {
                         "argc": argc_name,
                         "argv": argv_name,
                     }
                 )
 
                 # MainEntry already covers the initial block.
-                # Do not create a duplicate before the first IF.
                 process_compound(
                     body,
                     entry_probe=False,
@@ -1166,62 +1581,49 @@ def collect_points(
                     initial_covered=False
                 )
 
-            # Prevent function body from being processed twice.
+            # Don't process this function twice.
             return
 
-        # ----------------------------------------------------
-        # Recursive AST traversal
-        # ----------------------------------------------------
-
-        for child in children(
-            node
-        ):
+        for child in children(node):
             walk(child)
 
-    walk(
-        ast
-    )
+    walk(ast)
 
-    # ========================================================
-    # Source order
-    # ========================================================
+    if not main_found:
+
+        raise RuntimeError(
+            "No main(argc, argv) function was found.\n"
+            "This instrumenter currently requires main() "
+            "because --p-output is initialized there."
+        )
 
     points.sort(
         key=lambda point:
         point.offset
     )
 
-    return (
-        points,
-        warnings
-    )
+    return points
 
 
 # ============================================================
-# Remove physical duplicate locations
+# Remove duplicate physical locations
 # ============================================================
 
-def remove_physical_duplicates(
-    points
-):
+def remove_physical_duplicates(points):
+
     result = []
     used_offsets = set()
 
     for point in points:
 
-        if (
-            point.offset
-            in used_offsets
-        ):
+        if point.offset in used_offsets:
             continue
 
         used_offsets.add(
             point.offset
         )
 
-        result.append(
-            point
-        )
+        result.append(point)
 
     return result
 
@@ -1231,6 +1633,7 @@ def remove_physical_duplicates(
 # ============================================================
 
 def make_cpp_runtime():
+
     return r'''/* ===== AUTO-GENERATED INSTRUMENTATION ===== */
 
 #include <fstream>
@@ -1242,16 +1645,12 @@ static bool __P_TRACE_READY = false;
 
 
 /*
- * Instrumentation runtime argument:
+ * Runtime usage:
  *
- *     --p-output <file>
+ * program --p-output trace.txt <original arguments>
  *
- * Example:
- *
- *     program.exe --p-output result/test1.txt 1 2 3
- *
- * --p-output and its value are removed from argc/argv
- * before the original program begins execution.
+ * --p-output and its path are removed from argc/argv before
+ * the original application logic executes.
  */
 static bool __P_INIT(int *argc, char **argv)
 {
@@ -1272,13 +1671,6 @@ static bool __P_INIT(int *argc, char **argv)
 
             output_path = argv[i + 1];
 
-            /*
-             * Remove:
-             *
-             *     --p-output <path>
-             *
-             * from argv.
-             */
             for (int j = i; j + 2 < *argc; ++j)
             {
                 argv[j] = argv[j + 2];
@@ -1286,9 +1678,6 @@ static bool __P_INIT(int *argc, char **argv)
 
             *argc -= 2;
 
-            /*
-             * argv[argc] must remain NULL.
-             */
             argv[*argc] = nullptr;
 
             break;
@@ -1349,9 +1738,12 @@ static inline void __P_TRACE(int id)
 
 # ============================================================
 # C tracing runtime
+#
+# Intentionally C89 compatible.
 # ============================================================
 
 def make_c_runtime():
+
     return r'''/* ===== AUTO-GENERATED INSTRUMENTATION ===== */
 
 #include <stdio.h>
@@ -1372,12 +1764,12 @@ static void __P_TRACE_CLOSE(void)
 
 
 /*
- * Instrumentation runtime argument:
+ * Runtime usage:
  *
- *     --p-output <file>
+ * program --p-output trace.txt <original arguments>
  *
- * --p-output and its value are removed from argc/argv
- * before the original program executes.
+ * --p-output and its path are removed from argc/argv before
+ * the original application logic executes.
  */
 static int __P_INIT(int *argc, char **argv)
 {
@@ -1402,11 +1794,6 @@ static int __P_INIT(int *argc, char **argv)
 
             output_path = argv[i + 1];
 
-            /*
-             * Remove:
-             *
-             *     --p-output <path>
-             */
             for (j = i; j + 2 < *argc; ++j)
             {
                 argv[j] = argv[j + 2];
@@ -1486,21 +1873,15 @@ def instrument_source(
     source_data,
     points
 ):
-    additions = []
 
-    # --------------------------------------------------------
-    # Assign P1, P2, P3...
-    # --------------------------------------------------------
+    insertions = []
 
+    # P1, P2, P3...
     for marker, point in enumerate(
         points,
         start=1
     ):
         point.marker = marker
-
-    # --------------------------------------------------------
-    # Generate source inserts
-    # --------------------------------------------------------
 
     for point in points:
 
@@ -1515,44 +1896,50 @@ def instrument_source(
         )
 
         # ====================================================
-        # MAIN ENTRY
-        #
-        # Initialize tracing before first P.
+        # main()
         # ====================================================
 
         if point.kind == "MainEntry":
 
-            argc_name = (
-                point.data["argc"]
-            )
+            argc_name = point.data["argc"]
+            argv_name = point.data["argv"]
 
-            argv_name = (
-                point.data["argv"]
-            )
+            if point.position == "after-brace":
 
-            text = (
-                "\n"
-                + indent
-                + "    "
-                + f"if (!__P_INIT(&{argc_name}, {argv_name}))"
-                + "\n"
-                + indent
-                + "    "
-                + "    return 2;"
-                + "\n"
-                + indent
-                + "    "
-                + f"__P_TRACE({point.marker});"
-            )
+                inner_indent = (
+                    indent
+                    + "    "
+                )
+
+                text = (
+                    "\n"
+                    + inner_indent
+                    + f"if (!__P_INIT(&{argc_name}, {argv_name}))"
+                    + "\n"
+                    + inner_indent
+                    + "    return 2;"
+                    + "\n"
+                    + inner_indent
+                    + f"__P_TRACE({point.marker});"
+                )
+
+            else:
+
+                text = (
+                    f"if (!__P_INIT(&{argc_name}, {argv_name})) "
+                    f"return 2;"
+                    + "\n"
+                    + indent
+                    + f"__P_TRACE({point.marker});"
+                    + "\n"
+                    + indent
+                )
 
         # ====================================================
-        # After {
+        # Braced block entry
         # ====================================================
 
-        elif (
-            point.position
-            == "after-brace"
-        ):
+        elif point.position == "after-brace":
 
             text = (
                 "\n"
@@ -1565,14 +1952,11 @@ def instrument_source(
         # Before statement
         # ====================================================
 
-        elif (
-            point.position
-            == "before-statement"
-        ):
+        elif point.position == "before-statement":
 
             text = (
                 f"__P_TRACE({point.marker});"
-                "\n"
+                + "\n"
                 + indent
             )
 
@@ -1580,10 +1964,7 @@ def instrument_source(
         # After statement
         # ====================================================
 
-        elif (
-            point.position
-            == "after-statement"
-        ):
+        elif point.position == "after-statement":
 
             text = (
                 "\n"
@@ -1591,29 +1972,75 @@ def instrument_source(
                 + f"__P_TRACE({point.marker});"
             )
 
+        # ====================================================
+        # Unbraced body
+        # ====================================================
+
+        elif point.position == "wrap-statement":
+
+            body_end = point.data["end"]
+
+            opening = (
+                "{"
+                + "\n"
+                + indent
+                + "    "
+                + f"__P_TRACE({point.marker});"
+                + "\n"
+                + indent
+            )
+
+            closing = (
+                "\n"
+                + indent
+                + "}"
+            )
+
+            # Closing brace.
+            #
+            # Priority 0 is intentional. If a loop-exit marker
+            # exists at the same original byte offset, the
+            # closing brace must appear before that marker.
+            insertions.append(
+                (
+                    body_end,
+                    0,
+                    closing.encode("utf-8")
+                )
+            )
+
+            text = opening
+
         else:
             continue
 
-        additions.append(
+        insertions.append(
             (
                 offset,
-                text.encode(
-                    "utf-8"
-                )
+                1,
+                text.encode("utf-8")
             )
         )
 
-    # --------------------------------------------------------
-    # Insert from end to beginning so Clang byte offsets
-    # remain valid.
-    # --------------------------------------------------------
+    # ========================================================
+    # Apply backwards.
+    #
+    # Original Clang offsets remain valid because later source
+    # positions are modified first.
+    # ========================================================
 
     output = source_data
 
-    for offset, data in sorted(
-        additions,
-        key=lambda item:
-        item[0],
+    for (
+        offset,
+        priority,
+        data
+    ) in sorted(
+        insertions,
+        key=lambda item: (
+            item[0],
+            item[1]
+        ),
         reverse=True
     ):
 
@@ -1634,51 +2061,27 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=(
-            "Cross-platform C/C++ "
-            "basic-block/path coverage instrumenter"
+            "Cross-platform C/C++ basic-block/path instrumenter"
         )
     )
-
-    # --------------------------------------------------------
-    # Input file
-    # --------------------------------------------------------
 
     parser.add_argument(
         "input",
-        help=(
-            "Input .c/.cpp source file"
-        )
+        help="Input C/C++ source file"
     )
-
-    # --------------------------------------------------------
-    # Output directory
-    # --------------------------------------------------------
 
     parser.add_argument(
         "-d",
         "--output-dir",
         default="output",
-        help=(
-            "Directory for generated "
-            "instrumented source"
-        )
+        help="Directory for generated instrumented source"
     )
-
-    # --------------------------------------------------------
-    # Optional output source name
-    # --------------------------------------------------------
 
     parser.add_argument(
         "-o",
         "--output",
-        help=(
-            "Optional instrumented source filename"
-        )
+        help="Optional output source filename"
     )
-
-    # --------------------------------------------------------
-    # Optional explicit compiler
-    # --------------------------------------------------------
 
     parser.add_argument(
         "--compiler",
@@ -1688,24 +2091,18 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # Version
-    # --------------------------------------------------------
-
     parser.add_argument(
         "--version",
         action="version",
-        version="instrumenter 1.1.0"
+        version="instrumenter 1.2.0"
     )
 
-    # --------------------------------------------------------
-    # Extra Clang arguments
+    # Anything after -- is passed directly to Clang.
     #
     # Example:
     #
-    # instrumenter source.cpp -d out -- -Iinclude -DDEBUG
-    # --------------------------------------------------------
-
+    # instrumenter main.c -d out -- -Iinclude -DDEBUG
+    #
     args, extra_args = (
         parser.parse_known_args()
     )
@@ -1715,13 +2112,12 @@ def main():
         and
         extra_args[0] == "--"
     ):
-
         extra_args = (
             extra_args[1:]
         )
 
     # ========================================================
-    # Resolve input
+    # Input source
     # ========================================================
 
     source = Path(
@@ -1744,17 +2140,13 @@ def main():
 
     try:
 
-        language = (
-            detect_language(
-                source
-            )
+        language = detect_language(
+            source
         )
 
-        compiler = (
-            find_compiler(
-                language,
-                args.compiler
-            )
+        compiler = find_compiler(
+            language,
+            args.compiler
         )
 
     except Exception as error:
@@ -1770,9 +2162,20 @@ def main():
     # Output directory
     # ========================================================
 
+    raw_output_dir = args.output_dir
+
     output_dir = Path(
-        args.output_dir
-    ).expanduser().resolve()
+        raw_output_dir
+    ).expanduser()
+
+    if not output_dir.is_absolute():
+
+        output_dir = (
+            Path.cwd()
+            / output_dir
+        )
+
+    output_dir = output_dir.resolve()
 
     try:
 
@@ -1781,10 +2184,39 @@ def main():
             exist_ok=True
         )
 
+    except PermissionError:
+
+        print(
+            "\nError: permission denied while creating "
+            "output directory:",
+            file=sys.stderr
+        )
+
+        print(
+            f"  {output_dir}",
+            file=sys.stderr
+        )
+
+        if is_windows():
+
+            print(
+                "\nWhen using Git Bash with a Windows EXE, "
+                "prefer a relative path:",
+                file=sys.stderr
+            )
+
+            print(
+                "  -d ./output/siemens",
+                file=sys.stderr
+            )
+
+        return 1
+
     except OSError as error:
 
         print(
-            f"Error creating output directory:\n"
+            f"\nError creating output directory:\n"
+            f"  {output_dir}\n"
             f"  {error}",
             file=sys.stderr
         )
@@ -1792,7 +2224,7 @@ def main():
         return 1
 
     # ========================================================
-    # Output source path
+    # Output source
     # ========================================================
 
     if args.output:
@@ -1800,9 +2232,7 @@ def main():
         output = (
             output_dir
             /
-            Path(
-                args.output
-            ).name
+            Path(args.output).name
         )
 
     else:
@@ -1854,38 +2284,46 @@ def main():
     )
 
     print(
-        f"Platform    : {platform_name()}"
+        f"Platform     : {platform_name()}"
     )
 
     print(
-        f"Input       : {source}"
+        f"Input        : {source}"
     )
 
     print(
-        f"Language    : {language}"
+        f"Language     : {language}"
     )
 
     print(
-        f"Compiler    : {compiler}"
+        f"Compiler     : {compiler}"
     )
 
     print(
-        f"Output dir  : {output_dir}"
+        f"Output dir   : {output_dir}"
     )
 
     print(
-        f"Output file : {output}"
+        f"Output file  : {output}"
+    )
+
+    print(
+        "Trace output : runtime --p-output <file>"
     )
 
     print()
 
     # ========================================================
-    # Parse AST
+    # Parse source
     # ========================================================
 
     try:
 
-        ast = run_clang_ast(
+        (
+            ast,
+            parser_mode,
+            legacy_c
+        ) = run_clang_ast(
             source,
             language,
             compiler,
@@ -1901,18 +2339,23 @@ def main():
 
         return 1
 
+    print(
+        f"Parser mode  : {parser_mode}"
+    )
+
+    print()
+
     # ========================================================
-    # Collect instrumentation points
+    # Collect P points
     # ========================================================
 
     try:
 
-        points, warnings = (
-            collect_points(
-                ast,
-                source,
-                source_data
-            )
+        points = collect_points(
+            ast,
+            source,
+            source_data,
+            legacy_c
         )
 
     except Exception as error:
@@ -1925,49 +2368,33 @@ def main():
 
         return 1
 
-    points = (
-        remove_physical_duplicates(
-            points
-        )
+    points = remove_physical_duplicates(
+        points
     )
 
     # ========================================================
-    # Generate instrumented code
+    # Generate
     # ========================================================
 
-    instrumented = (
-        instrument_source(
-            source_data,
-            points
-        )
+    instrumented = instrument_source(
+        source_data,
+        points
+    )
+
+    runtime = (
+        make_cpp_runtime()
+        if language == "cpp"
+        else make_c_runtime()
     )
 
     # ========================================================
-    # Runtime
-    # ========================================================
-
-    if language == "cpp":
-
-        runtime = (
-            make_cpp_runtime()
-        )
-
-    else:
-
-        runtime = (
-            make_c_runtime()
-        )
-
-    # ========================================================
-    # Save generated source
+    # Write
     # ========================================================
 
     try:
 
         output.write_bytes(
-            runtime.encode(
-                "utf-8"
-            )
+            runtime.encode("utf-8")
             + instrumented
         )
 
@@ -1982,7 +2409,7 @@ def main():
         return 1
 
     # ========================================================
-    # Report points
+    # Report
     # ========================================================
 
     print(
@@ -1994,55 +2421,10 @@ def main():
     for point in points:
 
         print(
-            f'P{point.marker:<4}'
-            f' line={point.line:<4}'
-            f' {point.kind}'
+            f"P{point.marker:<4}"
+            f" line={point.line:<4}"
+            f" {point.kind}"
         )
-
-    # ========================================================
-    # Warnings
-    # ========================================================
-
-    if warnings:
-
-        print()
-        print(
-            "Warnings:"
-        )
-
-        for (
-            offset,
-            warning_type
-        ) in warnings:
-
-            if offset is not None:
-
-                line = line_number(
-                    source_data,
-                    offset
-                )
-
-                print(
-                    f"  line {line}: "
-                    f"{warning_type}"
-                )
-
-            else:
-
-                print(
-                    f"  {warning_type}"
-                )
-
-        print()
-
-        print(
-            "Use braces { } around control-flow "
-            "bodies for reliable instrumentation."
-        )
-
-    # ========================================================
-    # Done
-    # ========================================================
 
     print()
 
@@ -2065,21 +2447,34 @@ def main():
     print()
 
     print(
-        "Runtime usage:"
+        "Runtime trace usage:"
     )
 
     if is_windows():
 
         print(
-            "  program.exe --p-output <trace-file> "
-            "<original-program-arguments>"
+            "  program.exe --p-output <trace.txt> "
+            "<original arguments>"
         )
 
     else:
 
         print(
-            "  ./program --p-output <trace-file> "
-            "<original-program-arguments>"
+            "  ./program --p-output <trace.txt> "
+            "<original arguments>"
+        )
+
+    if legacy_c:
+
+        print()
+
+        print(
+            "Legacy C detected."
+        )
+
+        print(
+            "Compile the generated source using GNU89 "
+            "compatibility when required."
         )
 
     return 0

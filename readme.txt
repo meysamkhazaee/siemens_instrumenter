@@ -35,3 +35,9 @@ instrumenter.exe sample.cpp -d output --compiler C:/msys64/ucrt64/bin/clang++.ex
 
 # Then compile the generated source:
 g++ output/sample_instrumented.cpp -o output/sample_instrumented.exe
+
+
+
+./dist/instrumenter.exe \
+  ./input/siemens/printtokens_2.0/printtokens/versions.alt/versions.orig/v1/print_tokens.c \
+  -d ./output/siemens
