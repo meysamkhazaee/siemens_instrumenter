@@ -1,0 +1,111 @@
+{
+  "version": 6,
+
+  "cmakeMinimumRequired": {
+      "major": 3,
+      "minor": 25,
+      "patch": 0
+  },
+
+  "configurePresets": [
+      {
+          "name": "mingw-base",
+          "hidden": true,
+
+          "generator": "MinGW Makefiles",
+
+          "environment": {
+              "PATH": "C:\\msys64\\ucrt64\\bin;$penv{PATH}"
+          },
+
+          "cacheVariables": {
+              "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
+              "CMAKE_MAKE_PROGRAM": "C:/msys64/ucrt64/bin/mingw32-make.exe",
+              "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+          }
+      },
+
+      {
+          "name": "debug",
+          "displayName": "MinGW Debug",
+
+          "inherits": "mingw-base",
+
+          "binaryDir": "${sourceDir}/build/debug",
+
+          "cacheVariables": {
+              "CMAKE_BUILD_TYPE": "Debug",
+              "ENABLE_COVERAGE": "OFF"
+          }
+      },
+
+      {
+          "name": "coverage",
+          "displayName": "MinGW GCC Coverage",
+
+          "inherits": "mingw-base",
+
+          "binaryDir": "${sourceDir}/build/coverage",
+
+          "cacheVariables": {
+              "CMAKE_BUILD_TYPE": "Debug",
+              "ENABLE_COVERAGE": "ON"
+          }
+      }
+  ],
+
+  "buildPresets": [
+      {
+          "name": "debug",
+          "displayName": "Build Debug",
+          "configurePreset": "debug"
+      },
+
+      {
+          "name": "coverage",
+          "displayName": "Build Coverage",
+          "configurePreset": "coverage"
+      },
+
+      {
+          "name": "coverage-report",
+          "displayName": "Build + Test + Coverage Report",
+          "configurePreset": "coverage",
+
+          "targets": [
+              "coverage_report"
+          ]
+      }
+  ],
+
+  "testPresets": [
+      {
+          "name": "coverage-tests",
+          "displayName": "Coverage Tests",
+          "configurePreset": "coverage",
+
+          "output": {
+              "outputOnFailure": true
+          }
+      }
+  ],
+
+  "workflowPresets": [
+      {
+          "name": "coverage-all",
+          "displayName": "Configure + Build + Test + Coverage HTML",
+
+          "steps": [
+              {
+                  "type": "configure",
+                  "name": "coverage"
+              },
+
+              {
+                  "type": "build",
+                  "name": "coverage-report"
+              }
+          ]
+      }
+  ]
+}
