@@ -14,7 +14,7 @@ or:
 g++ output/sample_instrumented.cpp -o output/sample_instrumented
 
 ## Run:
-./output/sample_instrumented 1 0 0 1 1 0 0 1
+./output/sample_instrumented.exe --p-output output/test2.txt 1 2 3 4 5 6 7 8
 
 ########################################################################
 
