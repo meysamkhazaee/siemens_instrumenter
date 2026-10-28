@@ -654,14 +654,7 @@ def collect_points(
     # This extends through the trailing semicolon.
     # ========================================================
 
-    def statement_end(statement):
-
-        end = get_end(statement)
-
-        if end is None:
-            return None
-
-        position = end
+    def skip_space_and_comments(position):
 
         while position < len(source_data):
 
@@ -669,7 +662,6 @@ def collect_points(
                 position:position + 1
             ]
 
-            # whitespace
             if current in (
                 b" ",
                 b"\t",
@@ -679,7 +671,6 @@ def collect_points(
                 position += 1
                 continue
 
-            # /* ... */
             if (
                 source_data[
                     position:position + 2
@@ -693,12 +684,11 @@ def collect_points(
                 )
 
                 if close < 0:
-                    break
+                    return len(source_data)
 
                 position = close + 2
                 continue
 
-            # // ...
             if (
                 source_data[
                     position:position + 2
@@ -718,6 +708,99 @@ def collect_points(
                 continue
 
             break
+
+        return position
+
+    # ========================================================
+    # Macro expansion end
+    #
+    # When a statement ends inside a macro expansion, Clang
+    # reports the macro *name* as the end location:
+    #
+    #     sum += (double)x(i,j);
+    #                    ^ end
+    #
+    # Extend through the macro argument list, otherwise the
+    # instrumenter would insert code between x and (i,j).
+    # ========================================================
+
+    def macro_expansion_end(statement, end):
+
+        location = (
+            statement
+            .get("range", {})
+            .get("end", {})
+        )
+
+        if not (
+            isinstance(location, dict)
+            and "spellingLoc" in location
+            and "expansionLoc" in location
+        ):
+            return end
+
+        position = skip_space_and_comments(
+            end
+        )
+
+        if (
+            source_data[
+                position:position + 1
+            ]
+            != b"("
+        ):
+            return end
+
+        depth = 0
+        quote = None
+
+        while position < len(source_data):
+
+            current = source_data[
+                position:position + 1
+            ]
+
+            if quote is not None:
+
+                if current == b"\\":
+                    position += 2
+                    continue
+
+                if current == quote:
+                    quote = None
+
+            elif current in (b"'", b'"'):
+                quote = current
+
+            elif current == b"(":
+                depth += 1
+
+            elif current == b")":
+
+                depth -= 1
+
+                if depth == 0:
+                    return position + 1
+
+            position += 1
+
+        return end
+
+    def statement_end(statement):
+
+        end = get_end(statement)
+
+        if end is None:
+            return None
+
+        end = macro_expansion_end(
+            statement,
+            end
+        )
+
+        position = skip_space_and_comments(
+            end
+        )
 
         if (
             position < len(source_data)
@@ -990,18 +1073,13 @@ def collect_points(
                     initial_covered=False
                 )
 
-            elif (
-                else_statement.get("kind")
-                == "IfStmt"
-            ):
-
-                # else if(...)
-                process_single_statement(
-                    else_statement,
-                    False
-                )
-
             else:
+
+                # Also covers else if(...). The nested if must be
+                # wrapped too: a bare marker would detach it from
+                # the else.
+                #
+                #     else __P_TRACE(n); if (...)   <- wrong
 
                 add_wrapped_body(
                     else_statement,
@@ -1022,7 +1100,10 @@ def collect_points(
             add(
                 statement_end(statement),
                 "IfMerge",
-                "after-statement"
+                "after-statement",
+                {
+                    "begin": get_begin(statement)
+                }
             )
 
             return True
@@ -1104,7 +1185,10 @@ def collect_points(
         add(
             statement_end(statement),
             kind + "Exit",
-            "after-statement"
+            "after-statement",
+            {
+                "begin": get_begin(statement)
+            }
         )
 
         return True
@@ -1313,7 +1397,10 @@ def collect_points(
             add(
                 statement_end(statement),
                 "SwitchExit",
-                "after-statement"
+                "after-statement",
+                {
+                    "begin": get_begin(statement)
+                }
             )
 
             return True
@@ -1998,13 +2085,23 @@ def instrument_source(
 
             # Closing brace.
             #
-            # Priority 0 is intentional. If a loop-exit marker
-            # exists at the same original byte offset, the
-            # closing brace must appear before that marker.
+            # Several insertions can share this byte offset:
+            #
+            #     while (c)            if (a)
+            #         x++;                 for (...) s;
+            #
+            # The while-exit marker belongs to a statement that
+            # starts before the wrapped body, so it goes after
+            # the brace. The for-exit marker belongs to the
+            # wrapped body itself, so it goes inside the brace.
+            #
+            # Insertions at the same offset are ordered by the
+            # begin of the statement they belong to, innermost
+            # (largest begin) first.
             insertions.append(
                 (
                     body_end,
-                    0,
+                    (0, -offset, 1),
                     closing.encode("utf-8")
                 )
             )
@@ -2014,10 +2111,25 @@ def instrument_source(
         else:
             continue
 
+        if point.position == "after-statement":
+
+            begin = point.data.get("begin")
+
+            if begin is None:
+                begin = offset
+
+            priority = (0, -begin, 0)
+
+        else:
+
+            # Code that starts something new goes after any
+            # closing braces / exit markers at this offset.
+            priority = (1, 0, 0)
+
         insertions.append(
             (
                 offset,
-                1,
+                priority,
                 text.encode("utf-8")
             )
         )
