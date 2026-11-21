@@ -661,6 +661,9 @@ def collect_points(
         if end is None:
             return None
 
+        if end > 0 and source_data[end - 1:end] in (b";", b"}"):
+            return end
+
         position = end
 
         while position < len(source_data):
@@ -729,6 +732,33 @@ def collect_points(
         ):
 
             return position + 1
+
+        if end > 0 and source_data[end - 1:end] == b"}":
+            return end
+
+        depth = 0
+        in_str = False
+        quote = 0
+        scan_pos = position
+        while scan_pos < len(source_data):
+            c = source_data[scan_pos]
+            if not in_str:
+                if c in (34, 39):
+                    in_str = True
+                    quote = c
+                elif c in (40, 91, 123):
+                    depth += 1
+                elif c in (41, 93, 125):
+                    if depth > 0:
+                        depth -= 1
+                elif c == 59 and depth == 0:
+                    return scan_pos + 1
+                elif c == 125 and depth == 0:
+                    break
+            else:
+                if c == quote and source_data[scan_pos - 1] != 92:
+                    in_str = False
+            scan_pos += 1
 
         return end
 
@@ -998,7 +1028,7 @@ def collect_points(
                 # else if(...)
                 process_single_statement(
                     else_statement,
-                    False
+                    True
                 )
 
             else:
@@ -1998,13 +2028,13 @@ def instrument_source(
 
             # Closing brace.
             #
-            # Priority 0 is intentional. If a loop-exit marker
-            # exists at the same original byte offset, the
-            # closing brace must appear before that marker.
+            # Priority 2 ensures that at the same original byte offset,
+            # loop-exit markers (priority 1) appear inside the closing brace,
+            # and the closing brace appears immediately before any subsequent else.
             insertions.append(
                 (
                     body_end,
-                    0,
+                    2,
                     closing.encode("utf-8")
                 )
             )

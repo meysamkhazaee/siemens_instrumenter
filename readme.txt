@@ -41,3 +41,16 @@ g++ output/sample_instrumented.cpp -o output/sample_instrumented.exe
 ./dist/instrumenter.exe \
   ./input/siemens/printtokens_2.0/printtokens/versions.alt/versions.orig/v1/print_tokens.c \
   -d ./output/siemens
+
+########################################################################
+
+## Batch instrument all Siemens suite programs:
+python batch_instrument.py
+
+# Or to instrument and compile all versions:
+python batch_instrument.py --compile
+
+# Output will be generated under:
+#   output/siemens/<repo>/<version>/
+# along with a full summary report in:
+#   output/siemens/instrumentation_summary.json
