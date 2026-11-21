@@ -4,3 +4,4 @@ output
 .vscode/settings.json
 input/siemens/
 *.spec
+__pycache__/
