@@ -309,6 +309,11 @@ def main():
         "--compiler",
         help="Custom compiler path (default: auto-detected Clang)"
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s (instrumenter {instrumenter.__version__})"
+    )
 
     args = parser.parse_args()
 
@@ -321,7 +326,7 @@ def main():
 
     compiler = instrumenter.find_compiler("c", args.compiler)
     print("=" * 60)
-    print(" Siemens Suite Batch Instrumenter")
+    print(f" Siemens Suite Batch Instrumenter (v{instrumenter.__version__})")
     print("=" * 60)
     print(f"Input dir       : {input_dir}")
     print(f"Output dir      : {output_dir}")

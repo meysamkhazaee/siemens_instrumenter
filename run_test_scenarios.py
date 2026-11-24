@@ -17,12 +17,15 @@ Capabilities:
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
 import difflib
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -349,6 +352,78 @@ def execute_version_tests(
     }
     json_file.write_text(json.dumps(detailed_data, indent=2), encoding="utf-8")
 
+    # 4. EFL-compatible 3-field CSV: cmp.v0.v<id>.<repo>.csv
+    cmp_csv_file = dest_dir / f"cmp.v0.{version_name}.{repo_name}.csv"
+    with open(cmp_csv_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        for r in results:
+            if not r["trace_faulty"].strip():
+                continue
+            writer.writerow([f"T{r['test_id']}", r["tag_strict"], r["trace_faulty"]])
+
+    # 5. EFL source_map.csv
+    source_map_file = dest_dir / "source_map.csv"
+    with open(source_map_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["predicate", "id", "file", "line", "column", "function", "address"])
+        for p in all_points:
+            writer.writerow([f"P{p.marker}", p.marker, orig_source.name, p.line, getattr(p, "col", 0), getattr(p, "func", "main"), "0x0"])
+
+    # 6. EFL source_changes.json
+    source_changes_file = dest_dir / "source_changes.json"
+    changes_list = []
+    for fd in fault_details:
+        orig_lines_str = str(fd.get("orig_lines", "1"))
+        if "-" in orig_lines_str:
+            start_l, end_l = map(int, orig_lines_str.split("-"))
+            f_lines = list(range(start_l, end_l + 1))
+        else:
+            f_lines = [int(orig_lines_str)]
+        p_cand_line = next((p.line for p in all_points if p.marker == fd.get("p_marker")), None)
+        if p_cand_line and p_cand_line not in f_lines:
+            f_lines.append(p_cand_line)
+        changes_list.append({
+            "file": orig_source.name,
+            "kind": fd.get("type", "replace"),
+            "reference_lines": f_lines,
+            "faulty_lines": f_lines,
+            "reference_text": [],
+            "faulty_text": [],
+            "header": False,
+        })
+    source_changes_file.write_text(json.dumps(changes_list, indent=2), encoding="utf-8")
+
+    # 7. EFL metadata.json
+    v_num = int(version_name.lstrip("v"))
+    metadata_file = dest_dir / "metadata.json"
+    metadata_file.write_text(json.dumps({
+        "program": repo_name,
+        "version": v_num,
+        "test_set": "full",
+    }, indent=2), encoding="utf-8")
+
+    # 8. EFL cache_manifest.json
+    manifest_file = dest_dir / "cache_manifest.json"
+    outputs = []
+    for p in [cmp_csv_file, source_map_file, source_changes_file, metadata_file]:
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+        outputs.append({"name": p.name, "size": p.stat().st_size, "sha256": h})
+    manifest_file.write_text(json.dumps({
+        "schema": 1,
+        "fingerprint": f"siemens-{repo_name}-{version_name}",
+        "options": {},
+        "outputs": outputs,
+    }, indent=2), encoding="utf-8")
+
+    # 9. Mirror to standard EFL hierarchy: output/results/<repo>/<version>/full/
+    results_ver_dir = output_datasets_base.parent / "results" / repo_name / version_name / "full"
+    results_ver_dir.mkdir(parents=True, exist_ok=True)
+    for p in [cmp_csv_file, source_map_file, source_changes_file, metadata_file, manifest_file, dataset_file, tagged_file, json_file]:
+        try:
+            shutil.copy2(p, results_ver_dir / p.name)
+        except Exception:
+            pass
+
     return {
         "repo": repo_name,
         "version": version_name,
@@ -427,7 +502,7 @@ def main():
     target_repos = SIEMENS_REPOS if args.repo == "all" else [args.repo]
 
     print("=" * 70)
-    print(" Siemens Suite Test Scenario Runner & Trace Dataset Generator")
+    print(f" Siemens Suite Test Scenario Runner & Trace Dataset Generator (v{instrumenter.__version__})")
     print("=" * 70)
     print(f"Siemens base dir : {siemens_base}")
     print(f"Output datasets  : {datasets_base}")

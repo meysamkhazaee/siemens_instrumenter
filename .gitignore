@@ -1,4 +1,4 @@
-output
+output/
 /build
 /dist
 .vscode/settings.json

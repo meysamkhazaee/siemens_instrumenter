@@ -9,6 +9,26 @@ import subprocess
 import sys
 
 
+def _load_version() -> str:
+    """Read version dynamically from the VERSION file."""
+    candidates = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(sys._MEIPASS) / "VERSION")
+    candidates.append(Path(__file__).resolve().parent / "VERSION")
+    candidates.append(Path(sys.executable).resolve().parent / "VERSION")
+    for p in candidates:
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+    return "1.2.0"
+
+
+__version__ = _load_version()
+
+
+
 # ============================================================
 # Supported AST constructs
 # ============================================================
@@ -2124,7 +2144,7 @@ def main():
     parser.add_argument(
         "--version",
         action="version",
-        version="instrumenter 1.2.0"
+        version=f"instrumenter {__version__}"
     )
 
     # Anything after -- is passed directly to Clang.

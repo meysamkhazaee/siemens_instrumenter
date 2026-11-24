@@ -1,5 +1,8 @@
 # C / C++ Basic-Block Instrumenter & Siemens Benchmark Suite Runner
 
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](file:///D:/personal/instrumenter/VERSION)
+[![Changelog](https://img.shields.io/badge/changelog-available-green.svg)](file:///D:/personal/instrumenter/CHANGELOG.md)
+
 این ریپازیتوری شامل ابزار اینسترومنت کردن کدهای C/C++ بر پایه نقاط پایه‌ای کنترل جریان (Basic Blocks) و ابزارهای اجرای دسته‌ای، آزمون و استخراج دیتاست‌های ردگیری مسیر (Execution Traces) برای مجموعه بنچ‌مارک‌های زیمنس (**Siemens Benchmark Suite**) است.
 
 ---
@@ -73,3 +76,30 @@ T,CC,T,F,CC,F,F,T,T,T
 ```
 
 علاوه بر این دو فایل، فایل `<version>_detailed.json` نیز شامل تمام جزئیات فنی، زمان‌های اجرا، وضعیت دقیق هر تست و مکان خطاست.
+
+---
+
+## ۴. ساختار خروجی استاندارد EFL و همگام‌سازی
+
+برای سازگاری کامل با خط لوله ارزیابی EFL، اسکریپت `run_test_scenarios.py` به‌صورت خودکار (و یا اسکریپت `sync_efl_datasets.py` برای دیتاست‌های موجود) خروجی‌های استاندارد زیر را در مسیر `output/results/<repo>/<version>/full/` تولید و آینه‌سازی می‌کنند:
+
+- **`cmp.v0.v<id>.<repo>.csv`**: ساختار سه‌ستونه استاندارد EFL شامل شناسه تست (`T1`)، برچسب دقیق (`T`, `CC`, `F`) و دنباله گره‌های اجرایی (`P1,P5,...`).
+- **`source_map.csv`**: نگاشت هر نقطه P به نام فایل، شماره خط، ستون و تابع مربوطه در کد مبنا.
+- **`source_changes.json`**: خطوط تغییریافته و مکان‌های تزریق خطا.
+- **`metadata.json`**: متادیتای بنچ‌مارک (نام برنامه، نسخه، مجموعه تست).
+- **`cache_manifest.json`**: هشدارهای تغییر و هشدارهای تمامیت فایل‌ها با کدهای SHA-256.
+
+```bash
+# همگام‌سازی سریع تمام دیتاست‌های زیمنس به فرمت استاندارد EFL:
+python sync_efl_datasets.py
+```
+
+---
+
+## ۵. نسخه و تاریخچه تغییرات (Versioning & Changelog)
+
+شماره نسخه این ابزار به‌صورت متمرکز در فایل [VERSION](file:///D:/personal/instrumenter/VERSION) نگهداری می‌شود و تمامی ابزارها (`instrumenter.py`, `batch_instrument.py`, `run_test_scenarios.py`) و بیلد باینری PyInstaller مستقیماً از آن رفرنس می‌گیرند.
+
+- **نسخه فعلی:** `1.2.0`
+- **تاریخچه کامل تغییرات:** [CHANGELOG.md](file:///D:/personal/instrumenter/CHANGELOG.md)
+
