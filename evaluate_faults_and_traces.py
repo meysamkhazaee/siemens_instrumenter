@@ -307,9 +307,11 @@ def evaluate_repository(repo_name: str, version_arg: str, siemens_base: Path, ou
     print(f"Discovered {len(test_commands)} test cases in universe.")
 
     # 2. Equivalence Check
-    inst_orig_exe = output_base / repo_name / "source.alt" / "source.orig" / f"{orig_c.stem}.exe"
+    inst_orig_exe = output_base / repo_name / "orig" / f"{orig_c.stem}.exe"
     if not inst_orig_exe.is_file():
-        inst_orig_exe = output_base / repo_name / "orig" / f"{orig_c.stem}.exe"
+        inst_orig_exe = output_base / repo_name / "source.alt" / "source.orig" / f"{orig_c.stem}.exe"
+    if not inst_orig_exe.is_file():
+        inst_orig_exe = output_base / repo_name / "source" / f"{orig_c.stem}.exe"
     print("\n[Step 1: Equivalence Check: Instrumented vs Uninstrumented]")
     eq_res = None
     if inst_orig_exe.is_file():
@@ -346,9 +348,11 @@ def evaluate_repository(repo_name: str, version_arg: str, siemens_base: Path, ou
                 print(f"    Faulty Code    : {' '.join(s.strip() for s in fb['faulty_code'][:2])}")
 
         # Path divergence trace
-        v_exe = output_base / repo_name / "versions.alt" / "versions.orig" / v_name / f"{orig_c.stem}.exe"
+        v_exe = output_base / repo_name / v_name / f"{orig_c.stem}.exe"
         if not v_exe.is_file():
-            v_exe = output_base / repo_name / v_name / f"{orig_c.stem}.exe"
+            v_exe = output_base / repo_name / "versions.alt" / "versions.orig" / v_name / f"{orig_c.stem}.exe"
+        if not v_exe.is_file():
+            v_exe = output_base / repo_name / "source.alt" / v_name / f"{orig_c.stem}.exe"
         tr_res = None
         if inst_orig_exe.is_file() and v_exe.is_file():
             fault_markers = {fb["p_marker"] for fb in fault_info["faults"]}

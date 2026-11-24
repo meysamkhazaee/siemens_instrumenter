@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-Synchronize all existing Siemens datasets into standard EFL structure.
+Convert any existing legacy Siemens v*_detailed.json datasets into compact EFL v2 structure.
 
-For every dataset in output/datasets/<repo>/v<id>_detailed.json:
-  1. Generates standard 3-field CSV: cmp.v0.v<id>.<repo>.csv
-  2. Generates source_map.csv from AST points
-  3. Generates source_changes.json from fault details & mutated lines
-  4. Generates metadata.json (program, version, test_set)
-  5. Generates cache_manifest.json (hashes & sizes)
-  6. Mirrors everything into output/results/<repo>/v<id>/full/
+For every legacy dataset in output/datasets/<repo>/v<id>_detailed.json, writes
+into output/results/<repo>/v<id>/full/:
+  1. traces.tsv.gz (gzip-compressed TSV: test_id, status, cc, path)
+  2. tests.tsv (test_id -> command/args mapping and execution metadata)
+  3. summary.json (compact dataset summary without trace sequences)
+  4. source_map.csv (AST predicate mapping)
+  5. source_changes.json (fault lines metadata)
+  6. metadata.json
+  7. cache_manifest.json
 """
 
 import csv
+import gzip
 import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
 import sys
 import time
 
@@ -37,6 +39,8 @@ def get_points_cache(input_base: Path):
         orig_source = in_repo / "source" / f"{stem}.c"
         if not orig_source.is_file():
             orig_source = in_repo / "source.alt" / "source.orig" / f"{stem}.c"
+        if not orig_source.is_file():
+            continue
 
         compiler = instrumenter.find_compiler("c")
         include_arg = [f"-I{orig_source.parent}"]
@@ -57,7 +61,7 @@ def sync_all():
     input_base = base_dir / "input" / "siemens"
 
     if not datasets_base.is_dir():
-        print(f"[-] Datasets directory not found: {datasets_base}")
+        print(f"[-] Legacy datasets directory not found: {datasets_base}")
         return 1
 
     print("[*] Pre-computing AST P-points for all Siemens programs...")
@@ -92,30 +96,63 @@ def sync_all():
 
             tests = data.get("tests", [])
             fault_details = data.get("fault_details", [])
+            results_ver_dir = results_base / repo / version_name / "full"
+            results_ver_dir.mkdir(parents=True, exist_ok=True)
 
-            # 1. Standard 3-field CSV: cmp.v0.v<id>.<repo>.csv
-            cmp_csv_name = f"cmp.v0.{version_name}.{repo}.csv"
-            cmp_csv_file = repo_dir / cmp_csv_name
-            with open(cmp_csv_file, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
+            # 1. traces.tsv.gz
+            traces_file = results_ver_dir / "traces.tsv.gz"
+            included_count = 0
+            excluded_count = 0
+            trace_lengths = []
+            n_pass = 0
+            n_cc = 0
+            n_fail = 0
+            with gzip.open(traces_file, "wt", encoding="utf-8", newline="\n", compresslevel=6) as gz_out:
+                gz_out.write("test_id\tstatus\tcc\tpath\n")
                 for t in tests:
                     t_id = t.get("test_id", 1)
-                    verdict_str = "F" if t.get("verdict") == "FAIL" else "T"
-                    trace = t.get("trace", "")
-                    if not trace.strip():
+                    verdict = t.get("verdict", "PASS")
+                    verdict_str = "F" if verdict == "FAIL" else "T"
+                    cc_flag = 1 if verdict == "COINCIDENTAL_CORRECT" else 0
+                    if verdict_str == "F":
+                        n_fail += 1
+                    elif cc_flag:
+                        n_cc += 1
+                    else:
+                        n_pass += 1
+                    trace_ids = run_test_scenarios._parse_trace_ids(t.get("trace", ""))
+                    if not trace_ids:
+                        excluded_count += 1
                         continue
-                    writer.writerow([f"T{t_id}", verdict_str, trace])
+                    included_count += 1
+                    trace_lengths.append(len(trace_ids))
+                    gz_out.write(f"T{t_id}\t{verdict_str}\t{cc_flag}\t{' '.join(trace_ids)}\n")
 
-            # 2. source_map.csv
-            source_map_file = repo_dir / "source_map.csv"
+            # 2. tests.tsv
+            tests_tsv_file = results_ver_dir / "tests.tsv"
+            with open(tests_tsv_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write("test_id\ttest_name\tstatus\tcc\tincluded\ttrace_len\tduration_sec\treturn_code\ttimed_out\treason\n")
+                for t in tests:
+                    t_id = t.get("test_id", 1)
+                    verdict = t.get("verdict", "PASS")
+                    verdict_str = "F" if verdict == "FAIL" else "T"
+                    cc_flag = 1 if verdict == "COINCIDENTAL_CORRECT" else 0
+                    trace_ids = run_test_scenarios._parse_trace_ids(t.get("trace", ""))
+                    included = 1 if trace_ids else 0
+                    reason = "" if included else "empty_trace"
+                    args_str = " ".join(str(a) for a in t.get("args", [])).replace("\t", " ")
+                    f.write(f"T{t_id}\t{args_str}\t{verdict_str}\t{cc_flag}\t{included}\t{len(trace_ids)}\t0.0\t0\t0\t{reason}\n")
+
+            # 3. source_map.csv
+            source_map_file = results_ver_dir / "source_map.csv"
             with open(source_map_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["predicate", "id", "file", "line", "column", "function", "address"])
+                writer.writerow(["predicate", "id", "file", "line", "column", "function", "kind", "address"])
                 for p in all_points:
-                    writer.writerow([f"P{p.marker}", p.marker, orig_source.name, p.line, getattr(p, "col", 0), getattr(p, "func", "main"), "0x0"])
+                    writer.writerow([f"P{p.marker}", p.marker, orig_source.name, p.line, getattr(p, "col", 0), getattr(p, "func", "main"), getattr(p, "kind", ""), "0x0"])
 
-            # 3. source_changes.json
-            source_changes_file = repo_dir / "source_changes.json"
+            # 4. source_changes.json
+            source_changes_file = results_ver_dir / "source_changes.json"
             changes_list = []
             for fd in fault_details:
                 orig_lines_str = str(fd.get("orig_lines", "1"))
@@ -132,49 +169,62 @@ def sync_all():
                     "kind": fd.get("type", "replace"),
                     "reference_lines": f_lines,
                     "faulty_lines": f_lines,
-                    "reference_text": [],
-                    "faulty_text": [],
+                    "reference_text": fd.get("orig_text", []),
+                    "faulty_text": fd.get("faulty_text", []),
                     "header": False,
                 })
             source_changes_file.write_text(json.dumps(changes_list, indent=2), encoding="utf-8")
 
-            # 4. metadata.json
-            metadata_file = repo_dir / "metadata.json"
+            # 5. metadata.json
+            metadata_file = results_ver_dir / "metadata.json"
             metadata_file.write_text(json.dumps({
+                "benchmark": "Siemens",
                 "program": repo,
                 "version": v_num,
                 "test_set": "full",
+                "source_file": orig_source.name,
             }, indent=2), encoding="utf-8")
 
-            # 5. cache_manifest.json
-            manifest_file = repo_dir / "cache_manifest.json"
+            # 6. summary.json
+            summary_file = results_ver_dir / "summary.json"
+            fault_markers = data.get("fault_markers", [])
+            summary_file.write_text(json.dumps({
+                "schema": "efl-dataset-v2",
+                "benchmark": "Siemens",
+                "program": repo,
+                "version": version_name,
+                "test_set": "full",
+                "tests_discovered": len(tests),
+                "tests_included": included_count,
+                "tests_excluded": excluded_count,
+                "total_trace_events": sum(trace_lengths),
+                "max_trace_events": max(trace_lengths, default=0),
+                "min_trace_events": min(trace_lengths, default=0),
+                "fault_predicates": fault_markers,
+                "counts": {
+                    "pass_clean": n_pass,
+                    "coincidental_correct": n_cc,
+                    "fail": n_fail,
+                },
+            }, indent=2), encoding="utf-8")
+
+            # 7. cache_manifest.json
+            manifest_file = results_ver_dir / "cache_manifest.json"
             outputs = []
-            for p in [cmp_csv_file, source_map_file, source_changes_file, metadata_file]:
+            for p in [traces_file, tests_tsv_file, summary_file, source_map_file, source_changes_file, metadata_file]:
                 h = hashlib.sha256(p.read_bytes()).hexdigest()
                 outputs.append({"name": p.name, "size": p.stat().st_size, "sha256": h})
             manifest_file.write_text(json.dumps({
                 "schema": 1,
                 "fingerprint": f"siemens-{repo}-{version_name}",
-                "options": {},
+                "options": {"format": "efl-dataset-v2"},
                 "outputs": outputs,
             }, indent=2), encoding="utf-8")
-
-            # 6. Mirror to results/<repo>/v<version>/full/
-            results_ver_dir = results_base / repo / version_name / "full"
-            results_ver_dir.mkdir(parents=True, exist_ok=True)
-
-            dataset_file = repo_dir / f"{version_name}_dataset.txt"
-            tagged_file = repo_dir / f"{version_name}_tagged.txt"
-
-            for src in [cmp_csv_file, source_map_file, source_changes_file, metadata_file, manifest_file, detailed_file, dataset_file, tagged_file]:
-                if src.exists():
-                    shutil.copy2(src, results_ver_dir / src.name)
 
             synced_count += 1
 
     elapsed = round(time.time() - start_time, 2)
-    print(f"\n[+] Successfully synced {synced_count} Siemens datasets in {elapsed}s!")
-    print(f"    Datasets flat:    {datasets_base}")
+    print(f"\n[+] Successfully converted {synced_count} Siemens datasets to EFL v2 in {elapsed}s!")
     print(f"    Results standard: {results_base}")
     return 0
 

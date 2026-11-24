@@ -2,12 +2,11 @@
 """
 Batch Instrumenter for the Siemens Benchmark Suite.
 
-Mirrored layout:
-  - output/siemens/<repo>/source/               : Error-free version (instrumented .c, compiled .exe, headers)
-  - output/siemens/<repo>/source.alt/source.orig: Error-free version (instrumented .c, compiled .exe, headers)
-  - output/siemens/<repo>/source.alt/v1..vN/    : Faulty versions (instrumented .c, compiled .exe, headers)
-  - output/siemens/<repo>/versions.alt/versions.orig/v1..vN/: Faulty versions (instrumented .c, compiled .exe, headers)
-  - Companion directories: inputs, scripts, testplans.alt, info, outputs, newoutputs, traces
+Compact single-copy layout:
+  - output/siemens/<repo>/orig/   : Error-free instrumented .c, headers, compiled .exe
+  - output/siemens/<repo>/v1..vN/ : Faulty instrumented .c, headers, compiled .exe
+Test inputs and universe testplans are read directly from input/siemens/<repo>/
+without duplicating them into output/siemens/.
 """
 
 import argparse
@@ -75,33 +74,10 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
 
-def mirror_repository_structure(repo_id: str, siemens_base: Path, output_base: Path):
-    """Mirror all auxiliary directories, test assets and empty directories to output."""
-    in_repo = siemens_base / repo_id
+def prepare_repository_output(repo_id: str, output_base: Path):
+    """Ensure compact output root exists without duplicating raw input assets."""
     out_repo = output_base / repo_id
     out_repo.mkdir(parents=True, exist_ok=True)
-
-    # Clean up old flat folders (orig, v1..vN at root) if they existed
-    for item in list(out_repo.iterdir()):
-        if item.is_dir() and (item.name == "orig" or re.match(r"^v\d+$", item.name)):
-            shutil.rmtree(item, ignore_errors=True)
-
-    # Copy auxiliary directories
-    aux_dirs = ["info", "inputs", "scripts", "testplans", "testplans.alt"]
-    for d_name in aux_dirs:
-        src_d = in_repo / d_name
-        dst_d = out_repo / d_name
-        if src_d.is_dir() and not dst_d.exists():
-            shutil.copytree(src_d, dst_d)
-
-    # Ensure standard directories exist
-    for d_name in ["source", "source.alt", "versions", "versions.alt", "outputs", "newoutputs", "traces"]:
-        (out_repo / d_name).mkdir(parents=True, exist_ok=True)
-
-    # Copy top-level files (e.g. README)
-    for f in in_repo.iterdir():
-        if f.is_file():
-            shutil.copy2(f, out_repo / f.name)
 
 
 def discover_targets(siemens_base: Path, repo_filter=None):
@@ -121,25 +97,19 @@ def discover_targets(siemens_base: Path, repo_filter=None):
         source_name = repo_info["source_name"]
 
         # 1. Base / original (healthy) version
-        # Try source/ first, then source.alt/source.orig/
         orig_dir = base_path / "source"
         if not (orig_dir / source_name).is_file():
             orig_dir = base_path / "source.alt" / "source.orig"
         orig_file = orig_dir / source_name
 
         if orig_file.is_file():
-            # Destination directories: both output/<repo>/source and output/<repo>/source.alt/source.orig
-            dest_dirs = [
-                Path("source"),
-                Path("source.alt") / "source.orig",
-            ]
             targets.append({
                 "repo": repo_id,
                 "version": "orig",
                 "source_path": orig_file,
                 "source_dir": orig_dir,
                 "source_name": source_name,
-                "rel_dest_dirs": dest_dirs,
+                "rel_dest_dirs": [Path("orig")],
             })
 
         # 2. Buggy versions (v1, v2, ...)
@@ -153,18 +123,13 @@ def discover_targets(siemens_base: Path, repo_filter=None):
                 v_dir = versions_base / v_name
                 v_file = v_dir / source_name
                 if v_file.is_file():
-                    # Destination directories: both source.alt/<vName> and versions.alt/versions.orig/<vName>
-                    dest_dirs = [
-                        Path("source.alt") / v_name,
-                        Path("versions.alt") / "versions.orig" / v_name,
-                    ]
                     targets.append({
                         "repo": repo_id,
                         "version": v_name,
                         "source_path": v_file,
                         "source_dir": v_dir,
                         "source_name": source_name,
-                        "rel_dest_dirs": dest_dirs,
+                        "rel_dest_dirs": [Path(v_name)],
                     })
 
     return targets
@@ -335,13 +300,13 @@ def main():
     print(f"Compile to exe  : {args.compile}")
     print("=" * 60)
 
-    # 1. Mirror auxiliary structure
+    # 1. Prepare compact output directories
     target_repos = args.repos if args.repos else [r["id"] for r in SIEMENS_REPOS]
-    print("[1/2] Mirroring Siemens suite structure and test assets...")
+    print("[1/2] Preparing Siemens output directories...")
     for repo_id in target_repos:
         if (input_dir / repo_id).is_dir():
-            mirror_repository_structure(repo_id, input_dir, output_dir)
-    print("      --> Auxiliary folders & structure mirrored successfully.")
+            prepare_repository_output(repo_id, output_dir)
+    print("      --> Output structure ready (reading test assets directly from input dir).")
 
     # 2. Discover and instrument
     print("[2/2] Discovering and instrumenting versions...")
