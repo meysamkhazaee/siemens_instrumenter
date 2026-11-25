@@ -1,9 +1,9 @@
-# C / C++ Basic-Block Instrumenter & Siemens Benchmark Suite Runner
+# C / C++ Basic-Block Instrumenter & Siemens / SIR Benchmark Suite Runner
 
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](file:///D:/personal/instrumenter/VERSION)
 [![Changelog](https://img.shields.io/badge/changelog-available-green.svg)](file:///D:/personal/instrumenter/CHANGELOG.md)
 
-این ریپازیتوری شامل ابزار اینسترومنت کردن کدهای C/C++ بر پایه نقاط پایه‌ای کنترل جریان (Basic Blocks) و ابزارهای اجرای دسته‌ای، آزمون و استخراج دیتاست‌های ردگیری مسیر (Execution Traces) برای مجموعه بنچ‌مارک‌های زیمنس (**Siemens Benchmark Suite**) است.
+این ریپازیتوری شامل ابزار اینسترومنت کردن کدهای C/C++ بر پایه نقاط پایه‌ای کنترل جریان (Basic Blocks) و ابزارهای اجرای دسته‌ای، آزمون و استخراج دیتاست‌های ردگیری مسیر (Execution Traces) برای بنچ‌مارک‌های **Siemens** (`printtokens`, `printtokens2`, `replace`, `schedule`, `schedule2`, `tcas`, `totinfo`) و برنامه‌های بزرگ‌تر **SIR** (`space`, `gzip`, `grep`, `sed`, `flex` — شامل پروژه‌های چندفایله) است.
 
 ---
 
@@ -36,8 +36,12 @@ python run_test_scenarios.py --repo schedule --version v3 --max-tests 50
 # اجرای تمام نسخه‌های یک برنامه:
 python run_test_scenarios.py --repo schedule --version all
 
-# اجرای تمام ۷ ماژول و تمام ۱۳۹ نسخه به‌صورت موازی با ۸ پردازه:
+# اجرای تمام برنامه‌های Siemens و SIR به‌صورت موازی با ۸ پردازه:
 python run_test_scenarios.py --repo all --version all -j 8
+
+# یا اجرای یکی از برنامه‌های SIR (مثل space، gzip، grep، sed، flex):
+python batch_instrument.py --repos space gzip grep sed flex
+python run_test_scenarios.py --repo grep --version all -j 8
 ```
 
 ---

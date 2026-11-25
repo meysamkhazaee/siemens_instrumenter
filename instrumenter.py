@@ -471,10 +471,17 @@ def is_main_file_node(
     if filename is None:
         return True
 
-    return (
+    if (
         normalized_path(filename)
         ==
         normalized_path(source)
+    ):
+        return True
+
+    # Yacc/Lex generated C files (e.g., flex's parse.c / scan.c) use #line "parse.y"
+    return (
+        Path(filename).suffix.lower() in {".y", ".l"}
+        and "includedFrom" not in location
     )
 
 
@@ -502,6 +509,20 @@ def line_number(
         .count(b"\n")
         + 1
     )
+
+
+def column_number(
+    source_data,
+    offset
+):
+    line_start = source_data.rfind(
+        b"\n",
+        0,
+        offset
+    )
+    if line_start < 0:
+        return offset + 1
+    return offset - line_start
 
 
 def indentation_at(
@@ -555,7 +576,10 @@ class Point:
         kind,
         position,
         line,
-        data=None
+        data=None,
+        col=0,
+        func="main",
+        file_name=""
     ):
 
         self.offset = offset
@@ -563,6 +587,9 @@ class Point:
         self.position = position
         self.line = line
         self.data = data or {}
+        self.col = col
+        self.func = func
+        self.file_name = file_name
 
         self.marker = None
 
@@ -575,13 +602,15 @@ def collect_points(
     ast,
     source,
     source_data,
-    legacy_c
+    legacy_c,
+    require_main=True
 ):
 
     points = []
     seen = set()
 
     main_found = False
+    current_function = "main"
 
     # ========================================================
     # Add P point
@@ -591,7 +620,8 @@ def collect_points(
         offset,
         kind,
         position,
-        data=None
+        data=None,
+        source_offset=None
     ):
 
         if offset is None:
@@ -614,6 +644,10 @@ def collect_points(
 
         seen.add(key)
 
+        clamped = min(
+            offset if source_offset is None else max(0, source_offset),
+            len(source_data),
+        )
         points.append(
             Point(
                 offset=offset,
@@ -621,12 +655,15 @@ def collect_points(
                 position=position,
                 line=line_number(
                     source_data,
-                    min(
-                        offset,
-                        len(source_data)
-                    )
+                    clamped
                 ),
                 data=data,
+                col=column_number(
+                    source_data,
+                    clamped
+                ),
+                func=current_function,
+                file_name=Path(source).name,
             )
         )
 
@@ -1188,7 +1225,8 @@ def collect_points(
                 if label_kind == "DefaultStmt"
                 else "CaseEntry"
             ),
-            "before-statement"
+            "before-statement",
+            source_offset=get_begin(label)
         )
 
         kind = sub_statement.get("kind")
@@ -1497,6 +1535,7 @@ def collect_points(
     def walk(node):
 
         nonlocal main_found
+        nonlocal current_function
 
         if not isinstance(node, dict):
             return
@@ -1544,6 +1583,8 @@ def collect_points(
                 "name",
                 ""
             )
+            prev_function = current_function
+            current_function = function_name or prev_function
 
             # =================================================
             # main()
@@ -1632,6 +1673,7 @@ def collect_points(
                 )
 
             # Don't process this function twice.
+            current_function = prev_function
             return
 
         for child in children(node):
@@ -1639,7 +1681,7 @@ def collect_points(
 
     walk(ast)
 
-    if not main_found:
+    if require_main and not main_found:
 
         raise RuntimeError(
             "No main(argc, argv) function was found.\n"
@@ -1792,6 +1834,28 @@ static inline void __P_TRACE(int id)
 # Intentionally C89 compatible.
 # ============================================================
 
+def make_c_runtime_header():
+    """Shared declaration header for multi-file C instrumentation."""
+    return (
+        "/* ===== AUTO-GENERATED INSTRUMENTATION RUNTIME HEADER ===== */\n"
+        "#ifndef EFL_TRACE_RUNTIME_H\n"
+        "#define EFL_TRACE_RUNTIME_H\n"
+        "int __P_INIT(int *argc, char **argv);\n"
+        "void __P_TRACE(int id);\n"
+        "#endif\n"
+        "/* ===== END INSTRUMENTATION RUNTIME HEADER ===== */\n\n"
+    )
+
+
+def make_c_runtime_source():
+    """Shared C89 runtime translation unit for multi-file C instrumentation."""
+    return (
+        make_c_runtime()
+        .replace("static int __P_INIT(", "int __P_INIT(")
+        .replace("static void __P_TRACE(", "void __P_TRACE(")
+    )
+
+
 def make_c_runtime():
 
     return r'''/* ===== AUTO-GENERATED INSTRUMENTATION ===== */
@@ -1921,15 +1985,16 @@ static void __P_TRACE(int id)
 
 def instrument_source(
     source_data,
-    points
+    points,
+    start_marker=1
 ):
 
     insertions = []
 
-    # P1, P2, P3...
+    # P1, P2, P3... (or starting from start_marker for multi-file builds)
     for marker, point in enumerate(
         points,
-        start=1
+        start=start_marker
     ):
         point.marker = marker
 

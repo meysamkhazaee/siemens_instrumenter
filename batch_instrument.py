@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Batch Instrumenter for the Siemens Benchmark Suite.
+Batch Instrumenter for Siemens & SIR C Benchmark Suites (single-file and multi-file).
 
 Compact single-copy layout:
-  - output/siemens/<repo>/orig/   : Error-free instrumented .c, headers, compiled .exe
-  - output/siemens/<repo>/v1..vN/ : Faulty instrumented .c, headers, compiled .exe
+  - output/siemens/<repo>/orig/   : Error-free instrumented .c/.h, compiled <stem>.exe
+  - output/siemens/<repo>/v1..vN/ : Faulty instrumented .c/.h, compiled <stem>.exe
 Test inputs and universe testplans are read directly from input/siemens/<repo>/
 without duplicating them into output/siemens/.
 """
@@ -12,66 +12,18 @@ without duplicating them into output/siemens/.
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
-import os
 from pathlib import Path
-import re
-import shutil
 import subprocess
 import sys
 import time
 
 import instrumenter
+import repos
 
 
-SIEMENS_REPOS = [
-    {
-        "id": "printtokens",
-        "top_dir": "printtokens_2.0",
-        "canon": "printtokens",
-        "source_name": "print_tokens.c",
-    },
-    {
-        "id": "printtokens2",
-        "top_dir": "printtokens2_2.0",
-        "canon": "printtokens2",
-        "source_name": "print_tokens2.c",
-    },
-    {
-        "id": "replace",
-        "top_dir": "replace_2.1.tar_2",
-        "canon": "replace",
-        "source_name": "replace.c",
-    },
-    {
-        "id": "schedule",
-        "top_dir": "schedule_2.0",
-        "canon": "schedule",
-        "source_name": "schedule.c",
-    },
-    {
-        "id": "schedule2",
-        "top_dir": "schedule2_2.0",
-        "canon": "schedule2",
-        "source_name": "schedule2.c",
-    },
-    {
-        "id": "tcas",
-        "top_dir": "tcas_2.0",
-        "canon": "tcas",
-        "source_name": "tcas.c",
-    },
-    {
-        "id": "totinfo",
-        "top_dir": "totinfo_2.0",
-        "canon": "totinfo",
-        "source_name": "tot_info.c",
-    },
-]
-
-
-def natural_sort_key(s):
-    """Sort v1, v2, ... v10 in natural numerical order."""
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+# Re-export registry symbols for backwards compatibility
+SIEMENS_REPOS = [dict(entry) for entry in repos.BENCHMARK_REPOS]
+natural_sort_key = repos.natural_sort_key
 
 
 def prepare_repository_output(repo_id: str, output_base: Path):
@@ -81,73 +33,74 @@ def prepare_repository_output(repo_id: str, output_base: Path):
 
 
 def discover_targets(siemens_base: Path, repo_filter=None):
-    """Scan all Siemens suite repositories and return targets."""
+    """Scan all configured Siemens and SIR repositories and return instrumentation targets."""
     targets = []
-    for repo_info in SIEMENS_REPOS:
+    for repo_info in repos.BENCHMARK_REPOS:
         repo_id = repo_info["id"]
         if repo_filter and repo_id not in repo_filter:
             continue
 
-        base_path = siemens_base / repo_info["canon"]
-        if not base_path.exists():
-            base_path = siemens_base / repo_info["top_dir"] / repo_info["canon"]
-        if not base_path.exists():
+        base_path = repos.find_repo_base(siemens_base, repo_id)
+        if not base_path:
             continue
 
-        source_name = repo_info["source_name"]
+        orig_dir = repos.find_orig_dir(base_path, repo_info)
+        if not orig_dir:
+            continue
 
         # 1. Base / original (healthy) version
-        orig_dir = base_path / "source"
-        if not (orig_dir / source_name).is_file():
-            orig_dir = base_path / "source.alt" / "source.orig"
-        orig_file = orig_dir / source_name
-
-        if orig_file.is_file():
+        orig_sources = repos.resolve_version_sources(orig_dir, None, repo_info)
+        if orig_sources["c_files"]:
             targets.append({
                 "repo": repo_id,
+                "suite": repo_info["suite"],
                 "version": "orig",
-                "source_path": orig_file,
+                "exe_stem": repo_info["exe_stem"],
+                "c_files": orig_sources["c_files"],
+                "h_files": orig_sources["h_files"],
+                "orig_dir": orig_dir,
                 "source_dir": orig_dir,
-                "source_name": source_name,
                 "rel_dest_dirs": [Path("orig")],
             })
 
         # 2. Buggy versions (v1, v2, ...)
-        versions_base = base_path / "versions.alt" / "versions.orig"
-        if not versions_base.is_dir():
-            versions_base = base_path / "source.alt"
-        if versions_base.is_dir():
-            v_dirs = [d for d in os.listdir(versions_base) if (versions_base / d).is_dir() and re.match(r"^v\d+$", d)]
-            v_dirs.sort(key=natural_sort_key)
-            for v_name in v_dirs:
-                v_dir = versions_base / v_name
-                v_file = v_dir / source_name
-                if v_file.is_file():
-                    targets.append({
-                        "repo": repo_id,
-                        "version": v_name,
-                        "source_path": v_file,
-                        "source_dir": v_dir,
-                        "source_name": source_name,
-                        "rel_dest_dirs": [Path(v_name)],
-                    })
+        for v_name, v_dir in repos.find_version_dirs(base_path):
+            ver_sources = repos.resolve_version_sources(orig_dir, v_dir, repo_info)
+            if ver_sources["c_files"]:
+                targets.append({
+                    "repo": repo_id,
+                    "suite": repo_info["suite"],
+                    "version": v_name,
+                    "exe_stem": repo_info["exe_stem"],
+                    "c_files": ver_sources["c_files"],
+                    "h_files": ver_sources["h_files"],
+                    "orig_dir": orig_dir,
+                    "source_dir": v_dir,
+                    "rel_dest_dirs": [Path(v_name)],
+                })
 
     return targets
 
 
 def instrument_single_target(target, output_base: Path, compiler: str, compile_exe: bool = True):
-    """Instrument a single target C file and deploy to destination paths."""
+    """Instrument a single-file or multi-file C target and deploy to destination paths."""
     repo = target["repo"]
     version = target["version"]
-    source_path = target["source_path"]
-    source_dir = target["source_dir"]
+    exe_stem = target.get("exe_stem", repos.get_source_stem(repo))
+    c_files: dict[str, Path] = target["c_files"]
+    h_files: dict[str, Path] = target["h_files"]
+    orig_dir: Path = target["orig_dir"]
+    source_dir: Path = target["source_dir"]
     rel_dest_dirs = target["rel_dest_dirs"]
 
     start_time = time.time()
+    primary_source = next(iter(c_files.values())) if c_files else source_dir
     result = {
         "repo": repo,
+        "suite": target.get("suite", repos.get_benchmark_suite(repo)),
         "version": version,
-        "source": str(source_path),
+        "source": str(primary_source),
+        "source_files": list(c_files.keys()),
         "output_destinations": [str(output_base / repo / d) for d in rel_dest_dirs],
         "success": False,
         "coverage_points": 0,
@@ -157,75 +110,114 @@ def instrument_single_target(target, output_base: Path, compiler: str, compile_e
     }
 
     try:
-        # Extra include flags
-        extra_args = [f"-I{source_dir}"]
-        orig_include = source_path.parent.parent.parent / "source.alt" / "source.orig"
-        if orig_include.exists() and orig_include != source_dir:
-            extra_args.append(f"-I{orig_include}")
+        include_dirs = [source_dir]
+        if orig_dir != source_dir:
+            include_dirs.append(orig_dir)
+        # Include subdirectories containing headers if multi-file
+        for h_path in h_files.values():
+            if h_path.parent not in include_dirs:
+                include_dirs.append(h_path.parent)
 
-        # Run Clang AST
-        ast, parser_mode, legacy_c = instrumenter.run_clang_ast(
-            source_path,
-            "c",
-            compiler,
-            extra_args
-        )
+        extra_args = repos.detect_compile_flags(h_files, include_dirs)
+        is_multi_file = len(c_files) > 1
 
-        source_data = source_path.read_bytes()
+        instrumented_files: dict[str, bytes] = {}
+        total_points = 0
+        next_marker = 1
+        parser_mode = None
+        main_found_anywhere = False
 
-        # Collect points
-        points = instrumenter.collect_points(
-            ast,
-            source_path,
-            source_data,
-            legacy_c
-        )
-        points = instrumenter.remove_physical_duplicates(points)
+        for rel_c, src_path in sorted(c_files.items()):
+            ast, file_parser_mode, legacy_c = instrumenter.run_clang_ast(
+                src_path,
+                "c",
+                compiler,
+                extra_args,
+            )
+            if parser_mode is None:
+                parser_mode = file_parser_mode
 
-        for idx, point in enumerate(points, 1):
-            point.marker = idx
+            source_data = src_path.read_bytes()
+            points = instrumenter.collect_points(
+                ast,
+                src_path,
+                source_data,
+                legacy_c,
+                require_main=False,
+            )
+            points = instrumenter.remove_physical_duplicates(points)
 
-        # Instrument source
-        instrumented_bytes = instrumenter.instrument_source(
-            source_data,
-            points
-        )
+            if any(p.kind == "MainEntry" for p in points):
+                main_found_anywhere = True
 
-        runtime = instrumenter.make_c_runtime()
-        final_content = runtime.encode("utf-8") + instrumented_bytes
+            instrumented_bytes = instrumenter.instrument_source(
+                source_data,
+                points,
+                start_marker=next_marker,
+            )
+            next_marker += len(points)
+            total_points += len(points)
 
-        # Header files to copy
-        headers = list(source_dir.glob("*.h"))
-        if orig_include.exists() and orig_include != source_dir:
-            for h in orig_include.glob("*.h"):
-                if not any(x.name == h.name for x in headers):
-                    headers.append(h)
+            if is_multi_file:
+                prefix = b'#include "efl_trace_runtime.h"\n'
+            else:
+                prefix = instrumenter.make_c_runtime().encode("utf-8")
+
+            instrumented_files[rel_c] = prefix + instrumented_bytes
+
+        if not main_found_anywhere:
+            raise RuntimeError(
+                "No main(argc, argv) function was found across target source files.\n"
+                "This instrumenter requires main(argc, argv) because --p-output is initialized there."
+            )
 
         compile_ok = True
         compile_err = None
 
-        # Write to all specified destinations
         for rel_d in rel_dest_dirs:
             dest_dir = output_base / repo / rel_d
             dest_dir.mkdir(parents=True, exist_ok=True)
 
-            dest_c_file = dest_dir / source_path.name
+            compiled_inputs: list[str] = []
+            for rel_c, content in instrumented_files.items():
+                dest_c = dest_dir / rel_c
+                dest_c.parent.mkdir(parents=True, exist_ok=True)
+                dest_c.write_bytes(content)
+                compiled_inputs.append(str(dest_c))
 
-            dest_c_file.write_bytes(final_content)
+            for rel_h, h_path in h_files.items():
+                dest_h = dest_dir / rel_h
+                dest_h.parent.mkdir(parents=True, exist_ok=True)
+                dest_h.write_bytes(h_path.read_bytes())
 
-            for h in headers:
-                (dest_dir / h.name).write_bytes(h.read_bytes())
+            if is_multi_file:
+                (dest_dir / "efl_trace_runtime.h").write_text(
+                    instrumenter.make_c_runtime_header(), encoding="utf-8"
+                )
+                runtime_c = dest_dir / "efl_trace_runtime.c"
+                runtime_c.write_text(instrumenter.make_c_runtime_source(), encoding="utf-8")
+                compiled_inputs.append(str(runtime_c))
 
             if compile_exe:
-                exe_file = dest_dir / f"{source_path.stem}.exe"
-                cmd = ["gcc", "-std=gnu89", "-w", str(dest_c_file), "-o", str(exe_file), "-I", str(dest_dir), "-lm"]
+                exe_file = dest_dir / f"{exe_stem}.exe"
+                dest_include_flags = ["-I", str(dest_dir)]
+                seen_inc = {dest_dir}
+                for rel_h in h_files:
+                    inc_dir = (dest_dir / rel_h).parent
+                    if inc_dir not in seen_inc:
+                        seen_inc.add(inc_dir)
+                        dest_include_flags.extend(["-I", str(inc_dir)])
+                if any(Path(rel).name == "config.h" for rel in h_files):
+                    dest_include_flags.append("-DHAVE_CONFIG_H")
+
+                cmd = [repos.find_gcc(), "-std=gnu89", "-w", *compiled_inputs, "-o", str(exe_file), *dest_include_flags, "-lm"]
                 comp_res = subprocess.run(cmd, capture_output=True, text=True)
                 if comp_res.returncode != 0:
                     compile_ok = False
                     compile_err = comp_res.stderr
 
         result["success"] = True
-        result["coverage_points"] = len(points)
+        result["coverage_points"] = total_points
         result["parser_mode"] = parser_mode
         if compile_exe:
             result["compile_success"] = compile_ok
@@ -241,12 +233,12 @@ def instrument_single_target(target, output_base: Path, compiler: str, compile_e
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Batch Instrumenter for Siemens Suite C Programs (source & source.alt layout)"
+        description="Batch Instrumenter for Siemens & SIR C Programs (single-file and multi-file)"
     )
     parser.add_argument(
         "-i", "--input-dir",
         default="input/siemens",
-        help="Siemens root directory (default: input/siemens)"
+        help="Siemens/SIR benchmark root directory (default: input/siemens)"
     )
     parser.add_argument(
         "-o", "--output-dir",
@@ -256,7 +248,7 @@ def main():
     parser.add_argument(
         "--repos",
         nargs="+",
-        help="Filter specific repos (e.g. printtokens replace totinfo)"
+        help="Filter specific repos (e.g. tcas space gzip grep sed flex)"
     )
     parser.add_argument(
         "--compile",
@@ -291,7 +283,7 @@ def main():
 
     compiler = instrumenter.find_compiler("c", args.compiler)
     print("=" * 60)
-    print(f" Siemens Suite Batch Instrumenter (v{instrumenter.__version__})")
+    print(f" Siemens & SIR Batch Instrumenter (v{instrumenter.__version__})")
     print("=" * 60)
     print(f"Input dir       : {input_dir}")
     print(f"Output dir      : {output_dir}")
@@ -300,15 +292,13 @@ def main():
     print(f"Compile to exe  : {args.compile}")
     print("=" * 60)
 
-    # 1. Prepare compact output directories
-    target_repos = args.repos if args.repos else [r["id"] for r in SIEMENS_REPOS]
-    print("[1/2] Preparing Siemens output directories...")
+    target_repos = args.repos if args.repos else repos.SIEMENS_REPOS
+    print("[1/2] Preparing output directories...")
     for repo_id in target_repos:
-        if (input_dir / repo_id).is_dir():
+        if repos.find_repo_base(input_dir, repo_id) is not None:
             prepare_repository_output(repo_id, output_dir)
     print("      --> Output structure ready (reading test assets directly from input dir).")
 
-    # 2. Discover and instrument
     print("[2/2] Discovering and instrumenting versions...")
     targets = discover_targets(input_dir, args.repos)
     print(f"Discovered {len(targets)} targets across repositories:")
@@ -358,7 +348,6 @@ def main():
         comp_ok = sum(1 for r in results if r.get("compile_success"))
         print(f"Compiled OK    : {comp_ok}/{len(results)}")
 
-    # Write summary JSON
     summary_path = output_dir / "instrumentation_summary.json"
     summary_data = {
         "total": len(results),

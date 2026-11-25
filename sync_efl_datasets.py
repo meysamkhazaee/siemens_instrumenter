@@ -23,34 +23,33 @@ import sys
 import time
 
 import instrumenter
+import repos
 import run_test_scenarios
 
 
-def natural_sort_key(s):
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+natural_sort_key = repos.natural_sort_key
 
 
 def get_points_cache(input_base: Path):
-    """Pre-compute P-points for all Siemens repos to make syncing instant."""
+    """Pre-compute P-points for all Siemens/SIR repos to make syncing instant."""
     cache = {}
-    for repo in run_test_scenarios.SIEMENS_REPOS:
-        stem = run_test_scenarios.get_source_stem(repo)
-        in_repo = input_base / repo
-        orig_source = in_repo / "source" / f"{stem}.c"
-        if not orig_source.is_file():
-            orig_source = in_repo / "source.alt" / "source.orig" / f"{stem}.c"
-        if not orig_source.is_file():
+    for repo in repos.SIEMENS_REPOS:
+        repo_info = repos.get_repo_info(repo)
+        in_repo = repos.find_repo_base(input_base, repo)
+        if not in_repo:
+            continue
+        orig_dir = repos.find_orig_dir(in_repo, repo_info)
+        if not orig_dir:
+            continue
+        orig_sources = repos.resolve_version_sources(orig_dir, None, repo_info)
+        if not orig_sources["c_files"]:
             continue
 
-        compiler = instrumenter.find_compiler("c")
-        include_arg = [f"-I{orig_source.parent}"]
-        ast, _, legacy = instrumenter.run_clang_ast(orig_source, "c", compiler, include_arg)
-        source_data = orig_source.read_bytes()
-        points = instrumenter.collect_points(ast, orig_source, source_data, legacy)
-        points = instrumenter.remove_physical_duplicates(points)
-        for idx, p in enumerate(points, 1):
-            p.marker = idx
-        cache[repo] = (orig_source, points)
+        inc_dirs = list({p.parent for p in [*orig_sources["c_files"].values(), *orig_sources["h_files"].values()]})
+        extra_args = repos.detect_compile_flags(orig_sources["h_files"], inc_dirs)
+        points = run_test_scenarios._collect_project_points(orig_sources["c_files"], extra_args)
+        primary_file = next(iter(orig_sources["c_files"]))
+        cache[repo] = (primary_file, points, repo_info["suite"])
     return cache
 
 
@@ -78,7 +77,7 @@ def sync_all():
         if repo not in points_cache:
             continue
 
-        orig_source, all_points = points_cache[repo]
+        primary_file, all_points, suite_name = points_cache[repo]
         detailed_files = sorted(repo_dir.glob("v*_detailed.json"), key=lambda p: natural_sort_key(p.name))
 
         for detailed_file in detailed_files:
@@ -149,7 +148,16 @@ def sync_all():
                 writer = csv.writer(f)
                 writer.writerow(["predicate", "id", "file", "line", "column", "function", "kind", "address"])
                 for p in all_points:
-                    writer.writerow([f"P{p.marker}", p.marker, orig_source.name, p.line, getattr(p, "col", 0), getattr(p, "func", "main"), getattr(p, "kind", ""), "0x0"])
+                    writer.writerow([
+                        f"P{p.marker}",
+                        p.marker,
+                        getattr(p, "file_name", "") or primary_file,
+                        p.line,
+                        getattr(p, "col", 0),
+                        getattr(p, "func", "main"),
+                        getattr(p, "kind", ""),
+                        "0x0",
+                    ])
 
             # 4. source_changes.json
             source_changes_file = results_ver_dir / "source_changes.json"
@@ -165,24 +173,24 @@ def sync_all():
                 if p_cand_line and p_cand_line not in f_lines:
                     f_lines.append(p_cand_line)
                 changes_list.append({
-                    "file": orig_source.name,
+                    "file": fd.get("file", primary_file),
                     "kind": fd.get("type", "replace"),
                     "reference_lines": f_lines,
                     "faulty_lines": f_lines,
                     "reference_text": fd.get("orig_text", []),
                     "faulty_text": fd.get("faulty_text", []),
-                    "header": False,
+                    "header": bool(fd.get("header", False)),
                 })
             source_changes_file.write_text(json.dumps(changes_list, indent=2), encoding="utf-8")
 
             # 5. metadata.json
             metadata_file = results_ver_dir / "metadata.json"
             metadata_file.write_text(json.dumps({
-                "benchmark": "Siemens",
+                "benchmark": suite_name,
                 "program": repo,
                 "version": v_num,
                 "test_set": "full",
-                "source_file": orig_source.name,
+                "source_file": primary_file,
             }, indent=2), encoding="utf-8")
 
             # 6. summary.json
@@ -190,7 +198,7 @@ def sync_all():
             fault_markers = data.get("fault_markers", [])
             summary_file.write_text(json.dumps({
                 "schema": "efl-dataset-v2",
-                "benchmark": "Siemens",
+                "benchmark": suite_name,
                 "program": repo,
                 "version": version_name,
                 "test_set": "full",
