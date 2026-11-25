@@ -35,9 +35,13 @@ def main():
 
         "--name",
         name,
-
-        str(source),
     ]
+
+    version_file = root / "VERSION"
+    if version_file.is_file():
+        command.extend(["--add-data", f"{version_file}{os.pathsep}."])
+
+    command.append(str(source))
 
     print(
         "Building instrumenter..."

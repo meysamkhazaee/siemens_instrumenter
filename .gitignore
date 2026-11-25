@@ -1,8 +1,7 @@
-output
-output_old
+output/
 /build
 /dist
 .vscode/settings.json
-*.spec
-myenv
 input/siemens/
+*.spec
+__pycache__/

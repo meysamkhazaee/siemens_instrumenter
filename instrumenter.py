@@ -9,6 +9,26 @@ import subprocess
 import sys
 
 
+def _load_version() -> str:
+    """Read version dynamically from the VERSION file."""
+    candidates = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(sys._MEIPASS) / "VERSION")
+    candidates.append(Path(__file__).resolve().parent / "VERSION")
+    candidates.append(Path(sys.executable).resolve().parent / "VERSION")
+    for p in candidates:
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+    return "1.2.0"
+
+
+__version__ = _load_version()
+
+
+
 # ============================================================
 # Supported AST constructs
 # ============================================================
@@ -451,10 +471,17 @@ def is_main_file_node(
     if filename is None:
         return True
 
-    return (
+    if (
         normalized_path(filename)
         ==
         normalized_path(source)
+    ):
+        return True
+
+    # Yacc/Lex generated C files (e.g., flex's parse.c / scan.c) use #line "parse.y"
+    return (
+        Path(filename).suffix.lower() in {".y", ".l"}
+        and "includedFrom" not in location
     )
 
 
@@ -482,6 +509,20 @@ def line_number(
         .count(b"\n")
         + 1
     )
+
+
+def column_number(
+    source_data,
+    offset
+):
+    line_start = source_data.rfind(
+        b"\n",
+        0,
+        offset
+    )
+    if line_start < 0:
+        return offset + 1
+    return offset - line_start
 
 
 def indentation_at(
@@ -535,7 +576,10 @@ class Point:
         kind,
         position,
         line,
-        data=None
+        data=None,
+        col=0,
+        func="main",
+        file_name=""
     ):
 
         self.offset = offset
@@ -543,6 +587,9 @@ class Point:
         self.position = position
         self.line = line
         self.data = data or {}
+        self.col = col
+        self.func = func
+        self.file_name = file_name
 
         self.marker = None
 
@@ -555,13 +602,15 @@ def collect_points(
     ast,
     source,
     source_data,
-    legacy_c
+    legacy_c,
+    require_main=True
 ):
 
     points = []
     seen = set()
 
     main_found = False
+    current_function = "main"
 
     # ========================================================
     # Add P point
@@ -571,7 +620,8 @@ def collect_points(
         offset,
         kind,
         position,
-        data=None
+        data=None,
+        source_offset=None
     ):
 
         if offset is None:
@@ -594,6 +644,10 @@ def collect_points(
 
         seen.add(key)
 
+        clamped = min(
+            offset if source_offset is None else max(0, source_offset),
+            len(source_data),
+        )
         points.append(
             Point(
                 offset=offset,
@@ -601,12 +655,15 @@ def collect_points(
                 position=position,
                 line=line_number(
                     source_data,
-                    min(
-                        offset,
-                        len(source_data)
-                    )
+                    clamped
                 ),
                 data=data,
+                col=column_number(
+                    source_data,
+                    clamped
+                ),
+                func=current_function,
+                file_name=Path(source).name,
             )
         )
 
@@ -654,7 +711,17 @@ def collect_points(
     # This extends through the trailing semicolon.
     # ========================================================
 
-    def skip_space_and_comments(position):
+    def statement_end(statement):
+
+        end = get_end(statement)
+
+        if end is None:
+            return None
+
+        if end > 0 and source_data[end - 1:end] in (b";", b"}"):
+            return end
+
+        position = end
 
         while position < len(source_data):
 
@@ -662,6 +729,7 @@ def collect_points(
                 position:position + 1
             ]
 
+            # whitespace
             if current in (
                 b" ",
                 b"\t",
@@ -671,6 +739,7 @@ def collect_points(
                 position += 1
                 continue
 
+            # /* ... */
             if (
                 source_data[
                     position:position + 2
@@ -684,11 +753,12 @@ def collect_points(
                 )
 
                 if close < 0:
-                    return len(source_data)
+                    break
 
                 position = close + 2
                 continue
 
+            # // ...
             if (
                 source_data[
                     position:position + 2
@@ -709,99 +779,6 @@ def collect_points(
 
             break
 
-        return position
-
-    # ========================================================
-    # Macro expansion end
-    #
-    # When a statement ends inside a macro expansion, Clang
-    # reports the macro *name* as the end location:
-    #
-    #     sum += (double)x(i,j);
-    #                    ^ end
-    #
-    # Extend through the macro argument list, otherwise the
-    # instrumenter would insert code between x and (i,j).
-    # ========================================================
-
-    def macro_expansion_end(statement, end):
-
-        location = (
-            statement
-            .get("range", {})
-            .get("end", {})
-        )
-
-        if not (
-            isinstance(location, dict)
-            and "spellingLoc" in location
-            and "expansionLoc" in location
-        ):
-            return end
-
-        position = skip_space_and_comments(
-            end
-        )
-
-        if (
-            source_data[
-                position:position + 1
-            ]
-            != b"("
-        ):
-            return end
-
-        depth = 0
-        quote = None
-
-        while position < len(source_data):
-
-            current = source_data[
-                position:position + 1
-            ]
-
-            if quote is not None:
-
-                if current == b"\\":
-                    position += 2
-                    continue
-
-                if current == quote:
-                    quote = None
-
-            elif current in (b"'", b'"'):
-                quote = current
-
-            elif current == b"(":
-                depth += 1
-
-            elif current == b")":
-
-                depth -= 1
-
-                if depth == 0:
-                    return position + 1
-
-            position += 1
-
-        return end
-
-    def statement_end(statement):
-
-        end = get_end(statement)
-
-        if end is None:
-            return None
-
-        end = macro_expansion_end(
-            statement,
-            end
-        )
-
-        position = skip_space_and_comments(
-            end
-        )
-
         if (
             position < len(source_data)
             and
@@ -812,6 +789,33 @@ def collect_points(
         ):
 
             return position + 1
+
+        if end > 0 and source_data[end - 1:end] == b"}":
+            return end
+
+        depth = 0
+        in_str = False
+        quote = 0
+        scan_pos = position
+        while scan_pos < len(source_data):
+            c = source_data[scan_pos]
+            if not in_str:
+                if c in (34, 39):
+                    in_str = True
+                    quote = c
+                elif c in (40, 91, 123):
+                    depth += 1
+                elif c in (41, 93, 125):
+                    if depth > 0:
+                        depth -= 1
+                elif c == 59 and depth == 0:
+                    return scan_pos + 1
+                elif c == 125 and depth == 0:
+                    break
+            else:
+                if c == quote and source_data[scan_pos - 1] != 92:
+                    in_str = False
+            scan_pos += 1
 
         return end
 
@@ -1073,13 +1077,18 @@ def collect_points(
                     initial_covered=False
                 )
 
-            else:
+            elif (
+                else_statement.get("kind")
+                == "IfStmt"
+            ):
 
-                # Also covers else if(...). The nested if must be
-                # wrapped too: a bare marker would detach it from
-                # the else.
-                #
-                #     else __P_TRACE(n); if (...)   <- wrong
+                # else if(...)
+                process_single_statement(
+                    else_statement,
+                    True
+                )
+
+            else:
 
                 add_wrapped_body(
                     else_statement,
@@ -1100,10 +1109,7 @@ def collect_points(
             add(
                 statement_end(statement),
                 "IfMerge",
-                "after-statement",
-                {
-                    "begin": get_begin(statement)
-                }
+                "after-statement"
             )
 
             return True
@@ -1185,10 +1191,7 @@ def collect_points(
         add(
             statement_end(statement),
             kind + "Exit",
-            "after-statement",
-            {
-                "begin": get_begin(statement)
-            }
+            "after-statement"
         )
 
         return True
@@ -1222,7 +1225,8 @@ def collect_points(
                 if label_kind == "DefaultStmt"
                 else "CaseEntry"
             ),
-            "before-statement"
+            "before-statement",
+            source_offset=get_begin(label)
         )
 
         kind = sub_statement.get("kind")
@@ -1397,10 +1401,7 @@ def collect_points(
             add(
                 statement_end(statement),
                 "SwitchExit",
-                "after-statement",
-                {
-                    "begin": get_begin(statement)
-                }
+                "after-statement"
             )
 
             return True
@@ -1534,6 +1535,7 @@ def collect_points(
     def walk(node):
 
         nonlocal main_found
+        nonlocal current_function
 
         if not isinstance(node, dict):
             return
@@ -1581,6 +1583,8 @@ def collect_points(
                 "name",
                 ""
             )
+            prev_function = current_function
+            current_function = function_name or prev_function
 
             # =================================================
             # main()
@@ -1669,6 +1673,7 @@ def collect_points(
                 )
 
             # Don't process this function twice.
+            current_function = prev_function
             return
 
         for child in children(node):
@@ -1676,7 +1681,7 @@ def collect_points(
 
     walk(ast)
 
-    if not main_found:
+    if require_main and not main_found:
 
         raise RuntimeError(
             "No main(argc, argv) function was found.\n"
@@ -1829,6 +1834,28 @@ static inline void __P_TRACE(int id)
 # Intentionally C89 compatible.
 # ============================================================
 
+def make_c_runtime_header():
+    """Shared declaration header for multi-file C instrumentation."""
+    return (
+        "/* ===== AUTO-GENERATED INSTRUMENTATION RUNTIME HEADER ===== */\n"
+        "#ifndef EFL_TRACE_RUNTIME_H\n"
+        "#define EFL_TRACE_RUNTIME_H\n"
+        "int __P_INIT(int *argc, char **argv);\n"
+        "void __P_TRACE(int id);\n"
+        "#endif\n"
+        "/* ===== END INSTRUMENTATION RUNTIME HEADER ===== */\n\n"
+    )
+
+
+def make_c_runtime_source():
+    """Shared C89 runtime translation unit for multi-file C instrumentation."""
+    return (
+        make_c_runtime()
+        .replace("static int __P_INIT(", "int __P_INIT(")
+        .replace("static void __P_TRACE(", "void __P_TRACE(")
+    )
+
+
 def make_c_runtime():
 
     return r'''/* ===== AUTO-GENERATED INSTRUMENTATION ===== */
@@ -1958,15 +1985,16 @@ static void __P_TRACE(int id)
 
 def instrument_source(
     source_data,
-    points
+    points,
+    start_marker=1
 ):
 
     insertions = []
 
-    # P1, P2, P3...
+    # P1, P2, P3... (or starting from start_marker for multi-file builds)
     for marker, point in enumerate(
         points,
-        start=1
+        start=start_marker
     ):
         point.marker = marker
 
@@ -2085,23 +2113,13 @@ def instrument_source(
 
             # Closing brace.
             #
-            # Several insertions can share this byte offset:
-            #
-            #     while (c)            if (a)
-            #         x++;                 for (...) s;
-            #
-            # The while-exit marker belongs to a statement that
-            # starts before the wrapped body, so it goes after
-            # the brace. The for-exit marker belongs to the
-            # wrapped body itself, so it goes inside the brace.
-            #
-            # Insertions at the same offset are ordered by the
-            # begin of the statement they belong to, innermost
-            # (largest begin) first.
+            # Priority 2 ensures that at the same original byte offset,
+            # loop-exit markers (priority 1) appear inside the closing brace,
+            # and the closing brace appears immediately before any subsequent else.
             insertions.append(
                 (
                     body_end,
-                    (0, -offset, 1),
+                    2,
                     closing.encode("utf-8")
                 )
             )
@@ -2111,25 +2129,10 @@ def instrument_source(
         else:
             continue
 
-        if point.position == "after-statement":
-
-            begin = point.data.get("begin")
-
-            if begin is None:
-                begin = offset
-
-            priority = (0, -begin, 0)
-
-        else:
-
-            # Code that starts something new goes after any
-            # closing braces / exit markers at this offset.
-            priority = (1, 0, 0)
-
         insertions.append(
             (
                 offset,
-                priority,
+                1,
                 text.encode("utf-8")
             )
         )
@@ -2206,7 +2209,7 @@ def main():
     parser.add_argument(
         "--version",
         action="version",
-        version="instrumenter 1.2.0"
+        version=f"instrumenter {__version__}"
     )
 
     # Anything after -- is passed directly to Clang.
