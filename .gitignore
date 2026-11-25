@@ -5,3 +5,5 @@ output/
 input/siemens/
 *.spec
 __pycache__/
+myenv
+output_old
